@@ -11,8 +11,7 @@
 import sgtk
 import os
 import sys
-import threading
-import traceback
+import re
 
 # by importing QT from sgtk rather than directly, we ensure that
 # the code will be compatible with both PySide and PyQt.
@@ -60,7 +59,6 @@ class AppDialog(QtGui.QWidget):
 
         self.adobe = self._app.engine.adobe
 
-
         # logging happens via a standard toolkit logger
         logger.info("Launching Add to render Queue Application...")
 
@@ -69,7 +67,6 @@ class AppDialog(QtGui.QWidget):
         # - A Shotgun API instance, via self._app.shotgun
         # - An Sgtk API instance, via self._app.sgtk
 
-
         self.first_frame = self._app.get_setting('default_first_frame')
         self.last_frame = self._app.get_setting('default_last_frame')
 
@@ -77,18 +74,17 @@ class AppDialog(QtGui.QWidget):
         # self.ui.context.setText("Current Context: %s" % self._app.context)
         self.populate_widgets()
         self.connect_signals_and_slots()
-        self.alert_box("hello")
 
     def get_selected_comps(self):
-
         comps = []
-        # ToDo: this method needs to comp items. Currently it returns dictionarys that represent comp items but that isnt enough
-        # ToDo: A different adobe method needs to be used to get the full comp item so that we can read/write properties on the comp
 
+        # Have to search through all items in the scene because simply calling
+        # project.selection returns read only objects with reduced properties
+        for i in range(1, self.adobe.app.project.numItems+1):
+            theItem = self.adobe.app.project.item(i)
+            if theItem.data['instanceof'] == 'CompItem' and theItem.selected:
+                comps.append(theItem)
 
-        for selected_item in self.adobe.app.project.selection:
-            if selected_item['instanceof'] == 'CompItem':
-                comps.append(selected_item)
         return comps
 
     def populate_widgets(self):
@@ -97,7 +93,7 @@ class AppDialog(QtGui.QWidget):
         self.populate_presets()
 
     def populate_frame_range(self):
-        self.ui.frameRangeLineEdit.setText("%d - %d"%(self.first_frame, self.last_frame))
+        self.ui.frameRangeLineEdit.setText("%d - %d" % (self.first_frame, self.last_frame))
 
     def popular_frame_range_options(self):
         self.ui.frameRangeComboBox.insertItems(0, [self.COMP_TEXT, self.CUSTOM_TEXT])
@@ -108,9 +104,8 @@ class AppDialog(QtGui.QWidget):
         for preset_item in self._app.get_setting("render_presets"):
             # use an internal method to resolve the path of the ae template files
             resolved_path = self._app._TankBundle__resolve_hook_expression(preset_item['name'], preset_item['path'])
-            self.presets[preset_item['name']]=resolved_path
-            self.ui.renderFormatDropdown.insertItems(-1,[preset_item['name']])
-
+            self.presets[preset_item['name']] = resolved_path[0]
+            self.ui.renderFormatDropdown.insertItems(-1, [preset_item['name']])
 
     def connect_signals_and_slots(self):
         self.ui.frameRangeComboBox.currentIndexChanged.connect(self.refresh_frame_range)
@@ -128,40 +123,51 @@ class AppDialog(QtGui.QWidget):
 
         if len(selected_comps) == 0:
             self.alert_box("No comps selected")
+
+        count = 0
         for comp in selected_comps:
             frame_range = self.get_frame_range(comp)
             if frame_range[0] is None or frame_range[1] is None:
                 self.alert_box("Bad frame range")
-            self.create_render_queue_item_for_comp()
 
-    def get_frame_range(self, comp_index):
+            render_queue_template = self.get_render_queue_template()
+            if render_queue_template is None:
+                self.alert_box("Failed to find selected render preset")
 
-        first_frame = None
-        last_frame = None
-        custom_first_frame = None
-        custom_last_frame = None
-        range_string = self.ui.frameRangeLineEdit.text()
-        first_frame_str = range_string.split('-')[0].strip()
-        if first_frame_str.isdigit():
-            custom_first_frame = int(first_frame_str)
-            last_frame_str = range_string.split('-')[-1].strip()
-        if last_frame_str.isdigit():
-            custom_last_frame = int(last_frame_str)
+            self.create_render_queue_item_for_comp(comp, frame_range, render_queue_template)
+            count += 1
 
-        # toDo: the current method for returning comp items does not give us the frame range data
-        # comp_first_frame = comp.displayStartFrame
+        self.close()
+        self.alert_box('Successfully created ' + str(count) + ' item(s) in the render queue')
 
-        if self.ui.frameRangeComboBox.currentText() == self.CUSTOM_TEXT:
-            pass
-            # use the custom frame range
-            # make sure to not return a frame range that is outside the range of como
+    def get_frame_range(self, comp):
+        startFrame = None
+        endFrame = None
+
+        # Use comp frame range
+        if self.ui.frameRangeComboBox.currentText() == self.COMP_TEXT:
+            startFrame = comp.displayStartFrame
+            endFrame = int(comp.frameRate * comp.duration + 0.0001)
         else:
-            pass
-            # use the comp's inbuilt frame range
-        return [first_frame, last_frame]
+            rawText = self.ui.frameRangeLineEdit.text()
+            # Assumed pattern is {Digits}{NonDigitSeperator}{Digits} - e.g. 1001-1002
+            match = re.match(r'(\d+)(\D+)(\d+)', rawText)
+            if match:
+                startFrame = match.group(1)
+                endFrame = match.group(3)
+
+        return [startFrame, endFrame]
+
+    def get_render_queue_template(self):
+        render_queue_template = None
+
+        userSelection = self.ui.renderFormatDropdown.currentText()
+        if userSelection in self.presets:
+            render_queue_template = self.presets[userSelection]
+
+        return render_queue_template
 
     def alert_box(self, text):
-
         QtGui.QMessageBox.critical(
             self,
             "!",
@@ -171,8 +177,121 @@ class AppDialog(QtGui.QWidget):
         )
 
     def create_render_queue_item_for_comp(self, comp, frame_range, render_queue_template):
-        pass
-        # Create a render queue item
-        # for reference use: \\ldn-fs1\projects\__pipeline\software\TerritoryToolkit2Toolset\modules\ae\ae_renderItemFunctions.jsx
-        # The above javascript file shows how a render queue item was created in javascript, the adobe wrapper should allow
-        # the same functionality to be copied into python
+        templateName = self.ui.renderFormatDropdown.currentText()
+
+        # Check the template actually exists
+        if not self.check_template_exists(comp, frame_range, render_queue_template, templateName):
+            self.alert_box("Something went wrong applying or locating an output template")
+
+        renderQueueItem = self.adobe.app.project.renderQueue.items.add(comp)
+        try:
+            renderQueueItem.outputModule(renderQueueItem.numOutputModules).applyTemplate(templateName)
+        except:
+            self.alert_box("There's some kind of issue with this template\n\n" + str(templateName) + '\n' + str(render_queue_template))
+            return
+
+        # Set the render to the start/end times
+        self.adobe.app.beginSuppressDialogs()
+        renderQueueItem.timeSpanStart = frame_range[0]
+        renderQueueItem.timeSpanDuration = comp.duration
+        self.adobe.app.beginSuppressDialogs(False)
+
+        # Grab the output folder from templates
+        outputLocation = self.get_shotgrid_template(render_queue_template)
+
+        # Create the output folder if it doesn't already exist
+        folderPath = os.path.dirname(outputLocation)
+        if not os.path.exists(folderPath):
+            os.makedirs(folderPath)
+
+        # Set the filepath and name on the newly created output module
+        # Do it twice because it sometimes fails the first time - Sean
+        renderQueueItem.outputModule(renderQueueItem.numOutputModules).file = self.adobe.File(outputLocation)
+        renderQueueItem.outputModule(renderQueueItem.numOutputModules).file = self.adobe.File(outputLocation)
+
+    def get_shotgrid_template(self, render_queue_template):
+        if os.path.basename(render_queue_template).startswith('mov'):
+            templateName = self._app.get_setting("mov_render_template")
+        else:
+            templateName = self._app.get_setting("seq_render_template")
+
+        template = self._app.engine.get_template_by_name(templateName)
+
+        # Apply context as base fields
+        fields = self._app.context.as_template_fields(template)
+
+        # Grab fields from filename
+        fileName = self.adobe.app.project.file.name
+
+        # EntityName _ Name _v VersionNumber FileExtension
+        match = re.match(r'(.*)(_)(.*)(_v)(\d\d\d)(.*)', fileName)
+        if not match:
+            raise Exception("Couldn't retrieve info from filename, try saving your scene?")
+
+        fields['name'] = match.group(3)
+        fields['version'] = int(match.group(5))
+
+        # Add in a %04d number if it's a sequence then strip it out to be [####] for AE
+        if 'SEQ' in template.keys:
+            fields['SEQ'] = 9999
+            outputPath = template.apply_fields(fields)
+            outputPath = outputPath.replace('.9999.', '.[####].')
+
+        else:
+            outputPath = template.apply_fields(fields)
+
+        return outputPath
+
+    def check_template_exists(self, comp, frame_range, render_queue_template, templateName):
+        # Add the comp to the render queue
+        renderQueueItem = self.adobe.app.project.renderQueue.items.add(comp)
+
+        # If the output module template already exists, just apply it, otherwise import the prest project, save the new template, clean up, and then apply it
+        if templateName in renderQueueItem.outputModule(renderQueueItem.numOutputModules).templates:
+            renderQueueItem.outputModule(renderQueueItem.numOutputModules).applyTemplate(templateName)
+            renderQueueItem.remove()
+            return True
+
+        # Remove the comp from the render
+        renderQueueItem.remove()
+
+        # Import the preset project
+        importedProject = self.importPresetProject(render_queue_template)
+
+        # Get preset render queue item
+        presetRenderQueueItem = self.findRenderQueueItemByCompName('PRESET')
+        if presetRenderQueueItem is None:
+            return False
+
+        presetRenderQueueItem.outputModule(presetRenderQueueItem.numOutputModules).saveAsTemplate(templateName)
+        importedProject.remove()
+
+        return True
+
+    def findRenderQueueItemByCompName(self, comp_name):
+        renderQueueItems = self.adobe.app.project.renderQueue.items
+        for i in range(1, self.adobe.app.project.renderQueue.numItems+1):
+            if renderQueueItems[i].comp.name == comp_name:
+                return renderQueueItems[i]
+
+        return None
+
+    def importPresetProject(self, render_queue_template):
+        importProjectFolder = None
+
+        for i in range(1, self.adobe.app.project.numItems+1):
+            projectItem = self.adobe.app.project.item(i)
+
+            if projectItem['instanceof'] == 'FolderItem':
+                if projectItem.name == render_queue_template.name:
+                    importProjectFolder = projectItem
+                    break
+
+        if importProjectFolder is None:
+            fileObject = self.adobe.File(render_queue_template)
+            importOptions = self.adobe.ImportOptions()
+            importOptions.file = fileObject
+
+            importProjectFolder = self.adobe.app.project.importFile(importOptions)
+
+        return importProjectFolder
