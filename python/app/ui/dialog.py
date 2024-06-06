@@ -15,6 +15,7 @@ class Ui_Dialog(object):
     def setupUi(self, Dialog):
         Dialog.setObjectName("Dialog")
         Dialog.resize(395, 298)
+
         self.horizontalLayout = QtGui.QHBoxLayout(Dialog)
         self.horizontalLayout.setObjectName("horizontalLayout")
         self.mainLayout = QtGui.QVBoxLayout()
@@ -38,6 +39,22 @@ class Ui_Dialog(object):
         self.renderFormatDropdown.setObjectName("renderFormatDropdown")
         self.verticalLayout_2.addWidget(self.renderFormatDropdown)
         self.mainLayout.addWidget(self.renderFormatLayout)
+
+        # Options
+        self.optionsLayout = QtGui.QHBoxLayout()
+        self.optionsLayout.setObjectName("optionsLayout")
+        self.optionsGroupBox = QtGui.QGroupBox(Dialog)
+        self.optionsGroupBox.setObjectName("optionsGroupBox")
+        self.verticalLayout = QtGui.QVBoxLayout(self.optionsGroupBox)
+        self.verticalLayout.setObjectName("verticalLayout")
+        self.useCompNameCheckBox = QtGui.QCheckBox(self.optionsGroupBox)
+        self.useCompNameCheckBox.setObjectName("useCompNameCheckBox")
+        self.useCompNameCheckBox.setChecked(True)
+        self.verticalLayout.addWidget(self.useCompNameCheckBox)
+        self.optionsLayout.addWidget(self.optionsGroupBox)
+        self.mainLayout.addLayout(self.optionsLayout)
+
+        # Buttons
         self.buttonsLayout = QtGui.QHBoxLayout()
         self.buttonsLayout.setObjectName("buttonsLayout")
         self.addButton = QtGui.QPushButton(Dialog)
@@ -60,4 +77,6 @@ class Ui_Dialog(object):
         self.renderFormatLayout.setTitle(_translate("Dialog", "Render Format"))
         self.addButton.setText(_translate("Dialog", "Add To Queue"))
         self.cancelButton.setText(_translate("Dialog", "Cancel"))
+        self.optionsGroupBox.setTitle(_translate("Dialog", "Options"))
+        self.useCompNameCheckBox.setText(_translate("Dialog", "Use Comp Name as Render Name"))
 from . import resources_rc

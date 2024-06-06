@@ -88,18 +88,30 @@ class AppDialog(QtGui.QWidget):
         return comps
 
     def populate_widgets(self):
+        """
+            Populate the widgets with the default values
+        """
         self.populate_frame_range()
         self.popular_frame_range_options()
         self.populate_presets()
 
     def populate_frame_range(self):
+        """
+            Populate the frame range line edit with the default values
+        """
         self.ui.frameRangeLineEdit.setText("%d - %d" % (self.first_frame, self.last_frame))
 
     def popular_frame_range_options(self):
+        """
+            Populate the frame range combo box with the default options
+        """
         self.ui.frameRangeComboBox.insertItems(0, [self.COMP_TEXT, self.CUSTOM_TEXT])
         self.ui.frameRangeLineEdit.setEnabled(False)
 
     def populate_presets(self):
+        """
+            Populate the render format dropdown with the available presets
+        """
         self.presets = {}
         for preset_item in self._app.get_setting("render_presets"):
             # use an internal method to resolve the path of the ae template files
@@ -108,17 +120,26 @@ class AppDialog(QtGui.QWidget):
             self.ui.renderFormatDropdown.insertItems(-1, [preset_item['name']])
 
     def connect_signals_and_slots(self):
+        """
+            Connect the signals and slots
+        """
         self.ui.frameRangeComboBox.currentIndexChanged.connect(self.refresh_frame_range)
         self.ui.cancelButton.clicked.connect(self.close)
         self.ui.addButton.clicked.connect(self.create_render_queue_items)
 
     def refresh_frame_range(self):
+        """
+            Enable the frame range line edit if the custom option is selected
+        """
         if self.ui.frameRangeComboBox.currentText() == self.CUSTOM_TEXT:
             self.ui.frameRangeLineEdit.setEnabled(True)
         else:
             self.ui.frameRangeLineEdit.setEnabled(False)
 
     def create_render_queue_items(self):
+        """
+            Create a render queue item for each of the selected comps
+        """
         selected_comps = self.get_selected_comps()
 
         if len(selected_comps) == 0:
@@ -141,6 +162,13 @@ class AppDialog(QtGui.QWidget):
         self.alert_box('Successfully created ' + str(count) + ' item(s) in the render queue')
 
     def get_frame_range(self, comp):
+        """
+            Get the frame range to render
+
+            :param comp: The comp to get the frame range for
+
+            :returns: A list containing the start and end frame to render
+        """
         startFrame = None
         endFrame = None
 
@@ -159,6 +187,11 @@ class AppDialog(QtGui.QWidget):
         return [startFrame, endFrame]
 
     def get_render_queue_template(self):
+        """
+            Get the render queue template to use for the render queue item
+
+            :returns: The render queue template to use for the render queue item
+        """
         render_queue_template = None
 
         userSelection = self.ui.renderFormatDropdown.currentText()
@@ -177,6 +210,13 @@ class AppDialog(QtGui.QWidget):
         )
 
     def create_render_queue_item_for_comp(self, comp, frame_range, render_queue_template):
+        """
+            Create a render queue item for each of the selected comps
+
+            :param comp: The comp to add to the render queue
+            :param frame_range: The frame range to render
+            :param render_queue_template: The template to use for the render queue item
+        """
         templateName = self.ui.renderFormatDropdown.currentText()
 
         # Check the template actually exists
@@ -194,7 +234,6 @@ class AppDialog(QtGui.QWidget):
         self.adobe.app.beginSuppressDialogs()
         renderQueueItem.timeSpanStart = frame_range[0]
         renderQueueItem.timeSpanDuration = comp.duration
-        self.adobe.app.beginSuppressDialogs(False)
 
         # Grab the output folder from templates
         outputLocation = self.get_shotgrid_template(render_queue_template)
@@ -204,12 +243,56 @@ class AppDialog(QtGui.QWidget):
         if not os.path.exists(folderPath):
             os.makedirs(folderPath)
 
+        # Debugging
+        logger.debug("Output location: %s" % outputLocation)
+        logger.debug("Output folder: %s" % folderPath)
+        logger.debug("Comp Name: %s" % comp.name)
+
+        # Replace output location with comp name if checkbox is checked
+        if self.ui.useCompNameCheckBox.isChecked():
+            # Get the original output file and strip the folder path
+            originalOutputFile = outputLocation.replace(folderPath, '')
+
+            # Get the filename
+            fileName = self.adobe.app.project.file.name
+
+            # EntityName _ Name _v VersionNumber FileExtension
+            match = re.match(r'(.*)(_)(.*)(_v)(\d\d\d)(.*)', fileName)
+
+            name = match.group(3)
+            version = int(match.group(5))
+
+            # Get the comp name
+            compName = comp.name
+
+            # Join the comp name with the version number
+            newFileName = "%s_v%03d" % (compName, version)
+
+            # Replace the first group before the first . with the comp name
+            newOutputFile = re.sub(r'([^.]+)', newFileName, originalOutputFile, 1)
+
+            #Debugging
+            logger.debug("Original Output File: %s" % originalOutputFile)
+            logger.debug("New Output File: %s" % newOutputFile)
+
+            # Rebuild the output location
+            outputLocation = os.path.join(folderPath, newOutputFile)
+
         # Set the filepath and name on the newly created output module
         # Do it twice because it sometimes fails the first time - Sean
         renderQueueItem.outputModule(renderQueueItem.numOutputModules).file = self.adobe.File(outputLocation)
         renderQueueItem.outputModule(renderQueueItem.numOutputModules).file = self.adobe.File(outputLocation)
 
+        self.adobe.app.endSuppressDialogs(alert=False)
+
     def get_shotgrid_template(self, render_queue_template):
+        """
+            Get the output location from the render queue template
+
+            :param render_queue_template: The template to use for the render queue item
+
+            :returns: The output location for the render queue item
+        """
         if os.path.basename(render_queue_template).startswith('mov'):
             templateName = self._app.get_setting("mov_render_template")
         else:
@@ -243,6 +326,9 @@ class AppDialog(QtGui.QWidget):
         return outputPath
 
     def check_template_exists(self, comp, frame_range, render_queue_template, templateName):
+        """
+            Check that the template exists, if not create it
+        """
         # Add the comp to the render queue
         renderQueueItem = self.adobe.app.project.renderQueue.items.add(comp)
 
@@ -269,6 +355,13 @@ class AppDialog(QtGui.QWidget):
         return True
 
     def findRenderQueueItemByCompName(self, comp_name):
+        """
+            Find a render queue item by the comp name
+
+            :param comp_name: The name of the comp to search for
+
+            :returns: The render queue item
+        """
         renderQueueItems = self.adobe.app.project.renderQueue.items
         for i in range(1, self.adobe.app.project.renderQueue.numItems+1):
             if renderQueueItems[i].comp.name == comp_name:
@@ -277,6 +370,13 @@ class AppDialog(QtGui.QWidget):
         return None
 
     def importPresetProject(self, render_queue_template):
+        """
+            Import the preset project
+
+            :param render_queue_template: The template to use for the render queue item
+
+            :returns: The imported project
+        """
         importProjectFolder = None
 
         for i in range(1, self.adobe.app.project.numItems+1):
