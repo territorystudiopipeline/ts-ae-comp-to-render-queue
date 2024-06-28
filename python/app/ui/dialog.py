@@ -57,12 +57,32 @@ class Ui_Dialog(object):
         # Buttons
         self.buttonsLayout = QtGui.QHBoxLayout()
         self.buttonsLayout.setObjectName("buttonsLayout")
+
+        # Add Selected To Queue
         self.addButton = QtGui.QPushButton(Dialog)
         self.addButton.setObjectName("addButton")
-        self.buttonsLayout.addWidget(self.addButton)
+        self.addButton.setMinimumHeight(30)
+
+        # Add Active Comp To Queue
+        self.addActiveButton = QtGui.QPushButton(Dialog)
+        self.addActiveButton.setObjectName("addActiveButton")
+        self.addActiveButton.setMinimumHeight(30)
+
+        # Apply To Render Queue Items
+        self.applyButton = QtGui.QPushButton(Dialog)
+        self.applyButton.setObjectName("applyButton")
+        self.applyButton.setMinimumHeight(30)
+
+        # Cancel
         self.cancelButton = QtGui.QPushButton(Dialog)
         self.cancelButton.setObjectName("cancelButton")
+        self.cancelButton.setMinimumHeight(30)
+
+        self.buttonsLayout.addWidget(self.addButton)
+        self.buttonsLayout.addWidget(self.addActiveButton)
+        self.buttonsLayout.addWidget(self.applyButton)
         self.buttonsLayout.addWidget(self.cancelButton)
+
         self.mainLayout.addLayout(self.buttonsLayout)
         self.horizontalLayout.addLayout(self.mainLayout)
 
@@ -71,11 +91,13 @@ class Ui_Dialog(object):
 
     def retranslateUi(self, Dialog):
         _translate = QtCore.QCoreApplication.translate
-        Dialog.setWindowTitle(_translate("Dialog", "Add Comps to Render Queue"))
+        Dialog.setWindowTitle(_translate("Dialog", "Add Selected Comps to Render Queue"))
         self.frameRangeGroupBox.setTitle(_translate("Dialog", "Frame Range"))
         self.frameRangeLineEdit.setPlaceholderText(_translate("Dialog", "1001-1100"))
         self.renderFormatLayout.setTitle(_translate("Dialog", "Render Format"))
-        self.addButton.setText(_translate("Dialog", "Add To Queue"))
+        self.addButton.setText(_translate("Dialog", "Add Selected To Queue"))
+        self.addActiveButton.setText(_translate("Dialog", "Add Active Comp To Queue"))
+        self.applyButton.setText(_translate("Dialog", "Apply To Render Queue Items"))
         self.cancelButton.setText(_translate("Dialog", "Cancel"))
         self.optionsGroupBox.setTitle(_translate("Dialog", "Options"))
         self.useCompNameCheckBox.setText(_translate("Dialog", "Use Comp Name as Render Name"))
