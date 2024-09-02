@@ -13,6 +13,7 @@ import os
 import sys
 import re
 import time
+from contextlib import contextmanager
 
 # by importing QT from sgtk rather than directly, we ensure that
 # the code will be compatible with both PySide and PyQt.
@@ -43,6 +44,7 @@ class AppDialog(QtGui.QWidget):
     CUSTOM_TEXT = "Custom frame range"
     COMP_TEXT = 'Comp frame range'
     WORK_AREA_TEXT = 'Work area frame range'
+    SINGLE_FRAME_TEXT = 'Single frame'
 
     def __init__(self):
         """
@@ -78,36 +80,20 @@ class AppDialog(QtGui.QWidget):
         self.connect_signals_and_slots()
 
     def get_selected_comps(self):
+        """
+            Get the selected comps in the project
+        """
         comps = []
 
         # Have to search through all items in the scene because simply calling
         # project.selection returns read only objects with reduced properties
         # Loop through the items in the project
 
-        # TODO: Remove this at a later date
-        # Get the selected items array
-        # This doesn't work as expected
-        #item_array = self.adobe.app.project.selection
-        #array_length = len(item_array)
-        #logger.debug("Array Length: %s" % array_length)
-        # Loop through the items in the array and check if they are comps
-        #for i in range(1, array_length+1):
-        #    theItem = item_array[i]
-        #    logger.debug("Item: %s" % theItem)
-        #    if theItem.data['instanceof'] == 'CompItem':
-        #        comps.append(theItem)
-
         item_collection = self.adobe.app.project.items
         for item in self._app.engine.iter_collection(item_collection):
             # Check if the item is selected and is a comp
             if item.selected and self._app.engine.is_item_of_type(item, "CompItem"):
                 comps.append(item)
-
-        # Initial implementation TODO: Remove this at a later date
-        #for i in range(1, self.adobe.app.project.numItems+1):
-        #    theItem = self.adobe.app.project.item(i)
-        #    if theItem.data['instanceof'] == 'CompItem' and theItem.selected:
-        #        comps.append(theItem)
 
         return comps
 
@@ -116,7 +102,7 @@ class AppDialog(QtGui.QWidget):
             Populate the widgets with the default values
         """
         self.populate_frame_range()
-        self.popular_frame_range_options()
+        self.populate_frame_range_options()
         self.populate_presets()
 
     def populate_frame_range(self):
@@ -124,13 +110,15 @@ class AppDialog(QtGui.QWidget):
             Populate the frame range line edit with the default values
         """
         self.ui.frameRangeLineEdit.setText("%d - %d" % (self.first_frame, self.last_frame))
+        self.ui.singleFrameLineEdit.setText(str(self.first_frame))
 
-    def popular_frame_range_options(self):
+    def populate_frame_range_options(self):
         """
             Populate the frame range combo box with the default options
         """
-        self.ui.frameRangeComboBox.insertItems(0, [self.COMP_TEXT, self.WORK_AREA_TEXT, self.CUSTOM_TEXT])
+        self.ui.frameRangeComboBox.insertItems(0, [self.WORK_AREA_TEXT, self.COMP_TEXT, self.SINGLE_FRAME_TEXT, self.CUSTOM_TEXT])
         self.ui.frameRangeLineEdit.setEnabled(False)
+        self.ui.singleFrameLineEdit.setEnabled(False)
 
     def populate_presets(self):
         """
@@ -158,9 +146,32 @@ class AppDialog(QtGui.QWidget):
             Enable the frame range line edit if the custom option is selected
         """
         if self.ui.frameRangeComboBox.currentText() == self.CUSTOM_TEXT:
+
+            # Enable the frame range line edit
+            self.ui.frameRangeLineEdit.show()
             self.ui.frameRangeLineEdit.setEnabled(True)
-        else:
+
+            # Disable the single frame line edit
+            self.ui.singleFrameLineEdit.hide()
+            self.ui.singleFrameLineEdit.setEnabled(False)
+
+        elif self.ui.frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
+
+            # Enable the single frame line edit
+            self.ui.singleFrameLineEdit.show()
+            self.ui.singleFrameLineEdit.setEnabled(True)
+
+            # Disable the frame range line edit
+            self.ui.frameRangeLineEdit.hide()
             self.ui.frameRangeLineEdit.setEnabled(False)
+        else:
+            # Disable the frame range line edit
+            self.ui.frameRangeLineEdit.show()
+            self.ui.frameRangeLineEdit.setEnabled(False)
+
+            # Disable the single frame line edit
+            self.ui.singleFrameLineEdit.hide()
+            self.ui.singleFrameLineEdit.setEnabled(False)
 
     def create_render_queue_items(self, add_active=False):
         """
@@ -175,8 +186,9 @@ class AppDialog(QtGui.QWidget):
             selected_comps = [self.adobe.app.project.activeItem]
 
         else:
-            self.adobe.app.executeCommand(self.adobe.app.findMenuCommandId("Add to Render Queue"))
-            self.apply_to_render_queue_items()
+            with self.supress_dialogs():
+                self.adobe.app.executeCommand(self.adobe.app.findMenuCommandId("Add to Render Queue"))
+                self.apply_to_render_queue_items()
 
             return
             # This Method is too slow to be useful for large comps
@@ -252,9 +264,8 @@ class AppDialog(QtGui.QWidget):
             logger.debug("Render Queue Item: %s" % render_queue_item)
             logger.debug("Render Queue Item Status: %s" % render_queue_item.status)
 
-            # Status codes
-            # 3013 = NEEDS_OUTPUT, 3015 = QUEUED
-            if render_queue_item.status == 3013 or render_queue_item.status == 3015:
+            # Check if the render queue item is queued or needs output
+            if render_queue_item.status == self.adobe.RQItemStatus.QUEUED or render_queue_item.status == self.adobe.RQItemStatus.NEEDS_OUTPUT:
                 filtered_render_queue_items.append(render_queue_item)
 
         # Check if any render queue items are selected
@@ -392,6 +403,26 @@ class AppDialog(QtGui.QWidget):
                 endFrame = (comp.frameDuration * int(endFrame)) - comp.displayStartTime + 0.0001 # Add a small amount to ensure the last frame is included to avoid rounding errors
                 logger.debug("End Time: %s" % endFrame)
 
+        # Use single frame
+        elif self.ui.frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
+
+            logger.debug("Using single frame range")
+            rawText = self.ui.singleFrameLineEdit.text()
+            logger.debug("Single Frame: %s" % rawText)
+
+            # Assumed pattern is {Digits} - e.g. 1001
+            match = re.match(r'(\d+)', rawText)
+            if match:
+                startFrame = int(match.group(1))
+
+                # Convert to frame number
+                startFrame = (comp.frameDuration * int(startFrame)) - comp.displayStartTime
+                endFrame = startFrame
+
+                # Debugging info
+                logger.debug("Start Frame: %s" % startFrame)
+                logger.debug("End Frame: %s" % endFrame)
+
         return [startFrame, endFrame]
 
     def get_render_queue_template(self):
@@ -480,7 +511,6 @@ class AppDialog(QtGui.QWidget):
             return
 
         # Set the render to the start/end times
-        self.adobe.app.beginSuppressDialogs()
 
         if self.ui.frameRangeComboBox.currentText() == self.COMP_TEXT:
             renderQueueItem.timeSpanStart = 0
@@ -493,6 +523,10 @@ class AppDialog(QtGui.QWidget):
         elif self.ui.frameRangeComboBox.currentText() == self.CUSTOM_TEXT:
             renderQueueItem.timeSpanStart = frame_range[0]
             renderQueueItem.timeSpanDuration = frame_range[1] - frame_range[0]
+
+        elif self.ui.frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
+            renderQueueItem.timeSpanStart = frame_range[0]
+            renderQueueItem.timeSpanDuration = frame_range[0]
 
         # Grab the output folder from templates
         outputLocation = self.get_shotgrid_template(render_queue_template)
@@ -550,7 +584,6 @@ class AppDialog(QtGui.QWidget):
 
         # Log
         logger.debug("Comp: %s has been added to the render queue" % comp.name)
-        self.adobe.app.endSuppressDialogs(alert=False)
 
     def update_render_queue_item(self, comp, render_queue_item, frame_range, render_queue_template):
         """
@@ -589,6 +622,10 @@ class AppDialog(QtGui.QWidget):
         elif self.ui.frameRangeComboBox.currentText() == self.CUSTOM_TEXT:
             render_queue_item.timeSpanStart = frame_range[0]
             render_queue_item.timeSpanDuration = frame_range[1] - frame_range[0]
+
+        elif self.ui.frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
+            render_queue_item.timeSpanStart = frame_range[0]
+            render_queue_item.timeSpanDuration = comp.frameDuration * 1
 
         # Grab the output folder from templates
         outputLocation = self.get_shotgrid_template(render_queue_template)
@@ -639,10 +676,17 @@ class AppDialog(QtGui.QWidget):
             if not os.path.exists(folderPath):
                 os.makedirs(folderPath)
 
+        # If Single Frame is selected, Remove the frame range from the output location
+        if self.ui.frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
+
+            # Remove .[####]. from the output location
+            outputLocation = re.sub(r'\.\[\#\#\#\#\]\.', '.', outputLocation)
+
         # Set the filepath and name on the newly created output module
         # Do it twice because it sometimes fails the first time - Sean
-        render_queue_item.outputModule(render_queue_item.numOutputModules).file = self.adobe.File(outputLocation)
-        render_queue_item.outputModule(render_queue_item.numOutputModules).file = self.adobe.File(outputLocation)
+        with self.supress_dialogs():
+            render_queue_item.outputModule(render_queue_item.numOutputModules).file = self.adobe.File(outputLocation)
+            render_queue_item.outputModule(render_queue_item.numOutputModules).file = self.adobe.File(outputLocation)
 
         # Log
         logger.debug("Render Queue Item for: %s has been updated" % render_queue_item.comp.name)
@@ -757,3 +801,17 @@ class AppDialog(QtGui.QWidget):
             importProjectFolder = self.adobe.app.project.importFile(importOptions)
 
         return importProjectFolder
+
+    @contextmanager
+    def supress_dialogs(self):
+        """
+            Suppress dialogs
+        """
+
+        try:
+            logger.debug("Suppressing dialogs")
+            self.adobe.app.beginSuppressDialogs()
+            yield
+        finally:
+            logger.debug("Ending dialog suppression")
+            self.adobe.app.endSuppressDialogs(False)

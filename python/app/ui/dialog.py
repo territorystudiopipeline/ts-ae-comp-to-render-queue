@@ -18,25 +18,44 @@ class Ui_Dialog(object):
 
         self.horizontalLayout = QtGui.QHBoxLayout(Dialog)
         self.horizontalLayout.setObjectName("horizontalLayout")
+
         self.mainLayout = QtGui.QVBoxLayout()
         self.mainLayout.setObjectName("mainLayout")
+
         self.frameRangeGroupBox = QtGui.QGroupBox(Dialog)
         self.frameRangeGroupBox.setObjectName("frameRangeGroupBox")
+
         self.horizontalLayout_2 = QtGui.QHBoxLayout(self.frameRangeGroupBox)
         self.horizontalLayout_2.setObjectName("horizontalLayout_2")
+
+        # Frame Range
         self.frameRangeLineEdit = QtGui.QLineEdit(self.frameRangeGroupBox)
         self.frameRangeLineEdit.setObjectName("frameRangeLineEdit")
         self.horizontalLayout_2.addWidget(self.frameRangeLineEdit)
+
+        # Single Frame
+        self.singleFrameLineEdit = QtGui.QLineEdit(self.frameRangeGroupBox)
+        self.singleFrameLineEdit.setObjectName("singleFrameLineEdit")
+        # Force single frame to only accept numbers
+        self.singleFrameLineEdit.setValidator(QtGui.QIntValidator())
+        self.singleFrameLineEdit.hide()
+        self.horizontalLayout_2.addWidget(self.singleFrameLineEdit)
+
+        # Frame Range Dropdown
         self.frameRangeComboBox = QtGui.QComboBox(self.frameRangeGroupBox)
         self.frameRangeComboBox.setObjectName("frameRangeComboBox")
         self.horizontalLayout_2.addWidget(self.frameRangeComboBox)
         self.mainLayout.addWidget(self.frameRangeGroupBox)
+
         self.renderFormatLayout = QtGui.QGroupBox(Dialog)
         self.renderFormatLayout.setObjectName("renderFormatLayout")
+
         self.verticalLayout_2 = QtGui.QVBoxLayout(self.renderFormatLayout)
         self.verticalLayout_2.setObjectName("verticalLayout_2")
+
         self.renderFormatDropdown = QtGui.QComboBox(self.renderFormatLayout)
         self.renderFormatDropdown.setObjectName("renderFormatDropdown")
+
         self.verticalLayout_2.addWidget(self.renderFormatDropdown)
         self.mainLayout.addWidget(self.renderFormatLayout)
 
@@ -94,6 +113,7 @@ class Ui_Dialog(object):
         Dialog.setWindowTitle(_translate("Dialog", "Add Selected Comps to Render Queue"))
         self.frameRangeGroupBox.setTitle(_translate("Dialog", "Frame Range"))
         self.frameRangeLineEdit.setPlaceholderText(_translate("Dialog", "1001-1100"))
+        self.singleFrameLineEdit.setPlaceholderText(_translate("Dialog", "1001"))
         self.renderFormatLayout.setTitle(_translate("Dialog", "Render Format"))
         self.addButton.setText(_translate("Dialog", "Add Selected To Queue"))
         self.addActiveButton.setText(_translate("Dialog", "Add Active Comp To Queue"))
