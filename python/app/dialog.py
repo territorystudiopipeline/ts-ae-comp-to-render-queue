@@ -194,52 +194,6 @@ class AppDialog(QtGui.QWidget):
             # This Method is too slow to be useful for large comps
             #selected_comps = self.get_selected_comps()
 
-        # ----------------- NOT USED BELOW THIS LINE -----------------
-        # TODO: Remove this at a later date
-        # Keeping for reference
-
-        logger.debug("Selected comps: %s" % selected_comps)
-        logger.debug("Selected comps: %s" % len(selected_comps))
-
-        # Check if any comps are selected
-        if len(selected_comps) == 0:
-            self.alert_box("No comps selected", "Please select one or more comps to add to the render queue")
-            return
-
-        count = 0
-        render_queue_template = self.get_render_queue_template()
-        if render_queue_template is None:
-            self.alert_box("Error", "Failed to find selected render preset")
-            return
-
-        # Suppress dialogs
-        self.adobe.app.beginSuppressDialogs()
-
-        for comp in selected_comps:
-
-            # Get the frame range to render
-            frame_range = self.get_frame_range(comp)
-            if frame_range[0] is None or frame_range[1] is None:
-                logger.debug("Bad frame range, skipping %s" % comp.name)
-                self.alert_box("Bad frame range", "Please check the frame range for %s, Skipping" % comp.name)
-                pass
-
-            # Create a render queue item for each of the selected comps
-            self.create_render_queue_item_for_comp(comp, frame_range, render_queue_template)
-            count += 1
-
-        # End Suppress Dialogs
-        self.adobe.app.endSuppressDialogs()
-
-        # Debugging time stamp for testing HH:MM:SS
-        logger.debug("Finish Time: %s" % time.strftime("%H:%M:%S"))
-        logger.debug("Total Time: %s" % (time.time() - self.start_time))
-
-        self.message_box( 'Add Comps To Render Queue', 'Successfully Added %d comps to the render queue' % count)
-        self.close()
-
-        # ----------------- NOT USED ABOVE THIS LINE -----------------
-
     def apply_to_render_queue_items(self):
         """
             Apply the changes to the render queue items
@@ -609,23 +563,38 @@ class AppDialog(QtGui.QWidget):
                            "There's some kind of issue with this template\n\n" + str(templateName) + '\n' + str(
                                render_queue_template))
             return
-
+        # Check current time span
+        timespan = render_queue_item.getSetting("Time Span")
+        logger.debug("Time Span: %s" % timespan)
         # Set the render to the start/end times
         if self.ui.frameRangeComboBox.currentText() == self.COMP_TEXT:
-            render_queue_item.timeSpanStart = 0
-            render_queue_item.timeSpanDuration = comp.duration
+            if timespan == 0:
+                pass
+            else:
+                render_queue_item.setSetting("Time Span", 0)
+                #render_queue_item.timeSpanStart = 0
+                #render_queue_item.timeSpanDuration = render_queue_item.comp.duration
+                logger.debug("Setting time span to comp frame range")
 
         elif self.ui.frameRangeComboBox.currentText() == self.WORK_AREA_TEXT:
-            render_queue_item.timeSpanStart = comp.workAreaStart
-            render_queue_item.timeSpanDuration = comp.workAreaDuration
+            if timespan == 1:
+                pass
+            else:
+                render_queue_item.setSetting("Time Span", 1)
+                #render_queue_item.timeSpanStart =  render_queue_item.comp.workAreaStart
+                #render_queue_item.timeSpanDuration =  render_queue_item.comp.workAreaDuration
+                logger.debug("Setting time span to work area frame range")
 
         elif self.ui.frameRangeComboBox.currentText() == self.CUSTOM_TEXT:
             render_queue_item.timeSpanStart = frame_range[0]
             render_queue_item.timeSpanDuration = frame_range[1] - frame_range[0]
+            logger.debug("Setting time span to custom frame range")
 
         elif self.ui.frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
             render_queue_item.timeSpanStart = frame_range[0]
             render_queue_item.timeSpanDuration = comp.frameDuration * 1
+            logger.debug("Setting time span to single frame")
+        self.adobe.app.endSuppressDialogs(False)
 
         # Grab the output folder from templates
         outputLocation = self.get_shotgrid_template(render_queue_template)
@@ -678,7 +647,7 @@ class AppDialog(QtGui.QWidget):
 
         # If Single Frame is selected, Remove the frame range from the output location
         if self.ui.frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
-
+            #TODO: This needs to be revised, its not covering each case
             # Remove .[####]. from the output location
             outputLocation = re.sub(r'\.\[\#\#\#\#\]\.', '.', outputLocation)
 
