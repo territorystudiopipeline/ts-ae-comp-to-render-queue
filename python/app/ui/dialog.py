@@ -11,67 +11,61 @@
 
 from tank.platform.qt import QtCore, QtGui
 
+class DraggableTableWidget(QtGui.QTableWidget):
+    def __init__(self, parent=None):
+        super(DraggableTableWidget, self).__init__(parent)
+        #TODO: Implement drag and drop functionality
+        #self.setDragEnabled(True)
+        #self.setAcceptDrops(True)
+        #self.setDragDropMode(QtGui.QTableWidget.InternalMove)
+        self.setSelectionBehavior(QtGui.QTableWidget.SelectRows)
+        self.setSelectionMode(QtGui.QTableWidget.MultiSelection)
+
+    def dropEvent(self, event):
+        source_row = self.currentRow()
+        target_row = self.rowAt(event.pos().y())
+
+        if target_row == -1:
+            target_row = self.rowCount() - 1
+
+        if source_row != target_row:
+            self.insertRow(target_row)
+            for column in range(self.columnCount()):
+                self.setItem(target_row, column, self.takeItem(source_row, column))
+            self.removeRow(source_row)
+
+        event.accept()
+
 class Ui_Dialog(object):
     def setupUi(self, Dialog):
         Dialog.setObjectName("Dialog")
-        Dialog.resize(395, 298)
-
+        Dialog.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
+        Dialog.setMinimumSize(QtCore.QSize(800, 600))
         self.horizontalLayout = QtGui.QHBoxLayout(Dialog)
         self.horizontalLayout.setObjectName("horizontalLayout")
 
         self.mainLayout = QtGui.QVBoxLayout()
         self.mainLayout.setObjectName("mainLayout")
 
-        self.frameRangeGroupBox = QtGui.QGroupBox(Dialog)
-        self.frameRangeGroupBox.setObjectName("frameRangeGroupBox")
+        # Comp Table
+        self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Use Comp Name", "Include"]
 
-        self.horizontalLayout_2 = QtGui.QHBoxLayout(self.frameRangeGroupBox)
-        self.horizontalLayout_2.setObjectName("horizontalLayout_2")
+        self.compTableWidget = DraggableTableWidget(Dialog)
+        self.compTableWidget.setObjectName("compTableWidget")
+        self.compTableWidget.setColumnCount(len(self.compTableHeaders))
+        self.compTableWidget.setHorizontalHeaderLabels(self.compTableHeaders)
 
-        # Frame Range
-        self.frameRangeLineEdit = QtGui.QLineEdit(self.frameRangeGroupBox)
-        self.frameRangeLineEdit.setObjectName("frameRangeLineEdit")
-        self.horizontalLayout_2.addWidget(self.frameRangeLineEdit)
+        # Set column resize mode
+        header = self.compTableWidget.horizontalHeader()
+        header.setSectionResizeMode(0, QtGui.QHeaderView.Stretch)
+        header.setSectionResizeMode(1, QtGui.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QtGui.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QtGui.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QtGui.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QtGui.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QtGui.QHeaderView.ResizeToContents)
 
-        # Single Frame
-        self.singleFrameLineEdit = QtGui.QLineEdit(self.frameRangeGroupBox)
-        self.singleFrameLineEdit.setObjectName("singleFrameLineEdit")
-        # Force single frame to only accept numbers
-        self.singleFrameLineEdit.setValidator(QtGui.QIntValidator())
-        self.singleFrameLineEdit.hide()
-        self.horizontalLayout_2.addWidget(self.singleFrameLineEdit)
-
-        # Frame Range Dropdown
-        self.frameRangeComboBox = QtGui.QComboBox(self.frameRangeGroupBox)
-        self.frameRangeComboBox.setObjectName("frameRangeComboBox")
-        self.horizontalLayout_2.addWidget(self.frameRangeComboBox)
-        self.mainLayout.addWidget(self.frameRangeGroupBox)
-
-        self.renderFormatLayout = QtGui.QGroupBox(Dialog)
-        self.renderFormatLayout.setObjectName("renderFormatLayout")
-
-        self.verticalLayout_2 = QtGui.QVBoxLayout(self.renderFormatLayout)
-        self.verticalLayout_2.setObjectName("verticalLayout_2")
-
-        self.renderFormatDropdown = QtGui.QComboBox(self.renderFormatLayout)
-        self.renderFormatDropdown.setObjectName("renderFormatDropdown")
-
-        self.verticalLayout_2.addWidget(self.renderFormatDropdown)
-        self.mainLayout.addWidget(self.renderFormatLayout)
-
-        # Options
-        self.optionsLayout = QtGui.QHBoxLayout()
-        self.optionsLayout.setObjectName("optionsLayout")
-        self.optionsGroupBox = QtGui.QGroupBox(Dialog)
-        self.optionsGroupBox.setObjectName("optionsGroupBox")
-        self.verticalLayout = QtGui.QVBoxLayout(self.optionsGroupBox)
-        self.verticalLayout.setObjectName("verticalLayout")
-        self.useCompNameCheckBox = QtGui.QCheckBox(self.optionsGroupBox)
-        self.useCompNameCheckBox.setObjectName("useCompNameCheckBox")
-        self.useCompNameCheckBox.setChecked(True)
-        self.verticalLayout.addWidget(self.useCompNameCheckBox)
-        self.optionsLayout.addWidget(self.optionsGroupBox)
-        self.mainLayout.addLayout(self.optionsLayout)
+        self.mainLayout.addWidget(self.compTableWidget)
 
         # Buttons
         self.buttonsLayout = QtGui.QHBoxLayout()
@@ -80,25 +74,29 @@ class Ui_Dialog(object):
         # Add Selected To Queue
         self.addButton = QtGui.QPushButton(Dialog)
         self.addButton.setObjectName("addButton")
+        self.addButton.setText("Add To Queue")
         self.addButton.setMinimumHeight(30)
 
-        # Add Active Comp To Queue
-        self.addActiveButton = QtGui.QPushButton(Dialog)
-        self.addActiveButton.setObjectName("addActiveButton")
-        self.addActiveButton.setMinimumHeight(30)
-
-        # Apply To Render Queue Items
+        # Apply To Render Queue
         self.applyButton = QtGui.QPushButton(Dialog)
         self.applyButton.setObjectName("applyButton")
+        self.applyButton.setText("Apply")
         self.applyButton.setMinimumHeight(30)
+
+        # Refresh Comp List
+        self.refreshButton = QtGui.QPushButton(Dialog)
+        self.refreshButton.setObjectName("refreshButton")
+        self.refreshButton.setText("Refresh Comp List")
+        self.refreshButton.setMinimumHeight(30)
 
         # Cancel
         self.cancelButton = QtGui.QPushButton(Dialog)
         self.cancelButton.setObjectName("cancelButton")
+        self.cancelButton.setText("Cancel")
         self.cancelButton.setMinimumHeight(30)
 
         self.buttonsLayout.addWidget(self.addButton)
-        self.buttonsLayout.addWidget(self.addActiveButton)
+        self.buttonsLayout.addWidget(self.refreshButton)
         self.buttonsLayout.addWidget(self.applyButton)
         self.buttonsLayout.addWidget(self.cancelButton)
 
@@ -111,14 +109,6 @@ class Ui_Dialog(object):
     def retranslateUi(self, Dialog):
         _translate = QtCore.QCoreApplication.translate
         Dialog.setWindowTitle(_translate("Dialog", "Add Selected Comps to Render Queue"))
-        self.frameRangeGroupBox.setTitle(_translate("Dialog", "Frame Range"))
-        self.frameRangeLineEdit.setPlaceholderText(_translate("Dialog", "1001-1100"))
-        self.singleFrameLineEdit.setPlaceholderText(_translate("Dialog", "1001"))
-        self.renderFormatLayout.setTitle(_translate("Dialog", "Render Format"))
-        self.addButton.setText(_translate("Dialog", "Add Selected To Queue"))
-        self.addActiveButton.setText(_translate("Dialog", "Add Active Comp To Queue"))
-        self.applyButton.setText(_translate("Dialog", "Apply To Render Queue Items"))
+        self.addButton.setText(_translate("Dialog", "Add To Queue"))
         self.cancelButton.setText(_translate("Dialog", "Cancel"))
-        self.optionsGroupBox.setTitle(_translate("Dialog", "Options"))
-        self.useCompNameCheckBox.setText(_translate("Dialog", "Use Comp Name as Render Name"))
 from . import resources_rc
