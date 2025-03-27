@@ -100,113 +100,6 @@ class AppDialog(QtGui.QWidget):
 
         return comps
 
-    def on_item_changed(self, item):
-        """
-        Slot to handle item changes and apply the changes to all selected rows.
-        Currently not working
-        """
-        # Save the current selection
-        selected_items = self.ui.compTableWidget.selectedItems()
-        selected_rows = [item.row() for item in self.ui.compTableWidget.selectedItems()]
-        logger.debug("Selected Rows: %s" % selected_rows)
-
-        def update_item_signals(item, next_item, update_func):
-            """
-                Update the item signals
-            """
-            next_item.disableSignals()
-            update_func()
-            next_item.enableSignals()
-
-        if len(selected_rows) > 1:
-            # Apply the change to all selected rows
-            for row in selected_rows:
-                if row != item.row():
-                    logger.debug("Applying changes to row: %s" % row)
-                    if isinstance(item, QtGui.QTableWidgetItem):
-                        logger.debug("Item is a QTableWidgetItem")
-                        next_item = self.ui.compTableWidget.item(row, item.column())
-                        if next_item:
-                            # check if the item is using a check state else set the text
-                            if item.checkState() == QtCore.Qt.Checked:
-                                logger.debug("Updating Check State from %s to %s" % (next_item.checkState(), item.checkState()))
-                                update_item_signals(item, next_item, lambda: next_item.setCheckState(item.checkState()))
-                            elif item.checkState() == QtCore.Qt.Unchecked:
-                                logger.debug("Updating Check State from %s to %s" % (item.checkState(), next_item.checkState()))
-                                update_item_signals(item, next_item, lambda: next_item.setCheckState(item.checkState()))
-                            else:
-                                logger.debug("Updating Text from %s to %s" % (item.text(), next_item.text()))
-                                update_item_signals(item, next_item, lambda: next_item.setText(item.text()))
-                        else:
-                            logger.debug("Next item is None for row: %s, column: %s" % (row, item.column()))
-                    else:
-                        cell_widget = self.ui.compTableWidget.cellWidget(item.row(), item.column())
-                        if cell_widget:
-                            if isinstance(cell_widget, QtGui.QLineEdit):
-                                logger.debug("Cell Widget is a QLineEdit")
-                                next_widget = self.ui.compTableWidget.cellWidget(row, item.column())
-                                if next_widget:
-                                    logger.debug("Updating Text from %s to %s" % (cell_widget.text(), next_widget.text()))
-                                    update_item_signals(cell_widget, next_widget, lambda: next_widget.setText(cell_widget.text()))
-                                else:
-                                    logger.debug("Next widget is None for row: %s, column: %s" % (row, item.column()))
-
-                            elif isinstance(cell_widget, QtGui.QComboBox):
-                                logger.debug("Cell Widget is a QComboBox")
-                                next_widget = self.ui.compTableWidget.cellWidget(row, item.column())
-                                if next_widget:
-                                    logger.debug("Updating Index from %s to %s" % (cell_widget.currentIndex(), next_widget.currentIndex()))
-                                    update_item_signals(cell_widget, next_widget, lambda: next_widget.setCurrentIndex(cell_widget.currentIndex()))
-
-                            elif isinstance(cell_widget, QtGui.QCheckBox):
-                                logger.debug("Cell Widget is a QCheckBox")
-                                next_widget = self.ui.compTableWidget.cellWidget(row, item.column())
-                                if next_widget:
-                                    logger.debug("Updating Check State from %s to %s" % (cell_widget.checkState(), next_widget.checkState()))
-                                    update_item_signals(cell_widget, next_widget, lambda: next_widget.setCheckState(cell_widget.checkState()))
-
-    def update_selected_rows(self):
-        """
-            Update the selected rows with the new item
-            Currently not working
-        """
-        sender = self.sender()
-        if not sender:
-            return
-
-        selected_rows = {index.row() for index in self.ui.compTableWidget.selectionModel().selectedRows()}
-        if not selected_rows:
-            return
-
-        current_row = self.table.currentRow()
-        current_col = self.table.currentColumn()
-
-        # If the modified cell is a checkbox or text item
-        if isinstance(sender, QtGui.QTableWidget):
-            item = self.table.item(current_row, current_col)
-            if item:
-                new_value = item.text()
-                new_check_state = item.checkState()
-
-                for row in selected_rows:
-                    if row != current_row:  # Avoid self-updating
-                        update_item = self.table.item(row, current_col)
-                        if update_item:
-                            update_item.blockSignals(True)
-                            update_item.setText(new_value)
-                            update_item.setCheckState(new_check_state)
-                            update_item.blockSignals(False)
-        # If the modified cell is a combobox
-        elif isinstance(sender, QtGui.QComboBox):
-            new_text = sender.currentText()
-            for row in selected_rows:
-                if row != current_row:  # Avoid self-updating
-                    combo = self.table.cellWidget(row, current_col)
-                    if combo:
-                        combo.blockSignals(True)
-                        combo.setCurrentText(new_text)
-                        combo.blockSignals(False)
-
     def create_table_entries(self):
         """
             Create table entries for each of the comps
@@ -344,8 +237,12 @@ class AppDialog(QtGui.QWidget):
         self.ui.applyButton.clicked.connect(self.apply_to_render_queue_items)
         self.ui.refreshButton.clicked.connect(self.create_table_entries)
         self.ui.cancelButton.clicked.connect(self.close)
-        #TODO: Get multiple selection updates working
-        #self.ui.compTableWidget.itemChanged.connect(self.on_item_changed)
+
+        # Connect custom actions, pass the table cell widget user data from column 0
+        self.ui.removeCompAction.triggered.connect(self.remove_comp)
+        self.ui.jumpToCompAction.triggered.connect(self.jump_to_comp)
+        self.ui.removeSelectedCompsAction.triggered.connect(self.remove_selected_comps)
+        self.ui.matchSelectedCompsAction.triggered.connect(self.match_selected_to_current_row)
 
     def refresh_frame_range(self, frameRangeComboBox, frameRangeLineEdit, renderQueueItem):
         """
@@ -880,6 +777,138 @@ class AppDialog(QtGui.QWidget):
 
         return importProjectFolder
 
+    ####################################################################################################
+    # Context Menu Actions
+    ####################################################################################################
+    def get_row_from_cursor(self):
+        """
+            Get the row under the mouse cursor
+
+            :returns: The row under the mouse cursor
+        """
+
+        pos = QtGui.QCursor.pos()
+        table_pos = self.ui.compTableWidget.viewport().mapFromGlobal(pos)
+        current_row = self.ui.compTableWidget.rowAt(table_pos.y())
+
+        logger.debug("Returning Current Row: %s" % current_row)
+        return current_row
+
+
+    def jump_to_comp(self, comp_name):
+        """
+            Jump to the comp in the project
+        """
+        row = self.get_row_from_cursor()
+        item = self.ui.compTableWidget.item(row, 0) # Get the item in the first column of the row
+
+        if item:
+            render_queue_item = item.data(QtCore.Qt.UserRole)
+
+            # Jump to the comp
+            logger.debug("Jumping to comp: %s" % render_queue_item.comp.name)
+            render_queue_item.comp.openInViewer()
+
+    def remove_comp(self, comp_name):
+        """
+            Remove the comp from the render queue
+            offset by -1 because the table is 0 indexed and the render queue is 1 indexed.
+            This is still a bit of a hack, but it works for now and will be revised at in the future
+        """
+        row = self.get_row_from_cursor()
+        if row == -1:
+            logger.debug("Row is invalid")
+            return
+
+        item = self.ui.compTableWidget.item(row-1, 0)  # Get the item in the first column of the row
+
+        if item:
+            render_queue_item = item.data(QtCore.Qt.UserRole)
+
+            # Remove the comp
+            logger.debug("Removing comp: %s" % render_queue_item.comp.name)
+            render_queue_item.remove()
+            self.ui.compTableWidget.removeRow(row-1)
+
+
+    def remove_selected_comps(self):
+        """
+            Remove the selected comps from the render queue
+        """
+        # Get the selected rows
+        selected_rows = self.ui.compTableWidget.selectionModel().selectedRows()
+
+        # Check if any rows are selected
+        if not selected_rows:
+            self.alert_box("No comps selected", "Please select some comps to remove")
+            return
+
+        logger.debug("Removing selected comps: %s" % selected_rows)
+        # Remove the selected rows
+        for row in selected_rows:
+            item = self.ui.compTableWidget.item(row.row(), 0)
+            render_queue_item = item.data(QtCore.Qt.UserRole)
+
+            render_queue_item.remove()
+            self.ui.compTableWidget.removeRow(row.row())
+
+        logger.debug("Comps removed")
+
+    def match_selected_to_current_row(self):
+        """
+            Match the selected rows to the row
+        """
+
+        current_row = self.get_row_from_cursor()
+
+        # Get current options for the current row
+        current_frame_range = self.ui.compTableWidget.cellWidget(current_row, 3).currentText()
+
+        current_frame_range_text = ""
+        if current_frame_range == self.CUSTOM_TEXT or current_frame_range == self.SINGLE_FRAME_TEXT:
+            current_frame_range_text = self.ui.compTableWidget.cellWidget(current_row, 2).text()
+
+        current_render_format = self.ui.compTableWidget.cellWidget(current_row, 4).currentText()
+        current_use_comp_name = self.ui.compTableWidget.item(current_row, 5).checkState()
+        current_include = self.ui.compTableWidget.item(current_row, 6).checkState()
+
+        # Get the selected rows
+        selected_rows = self.ui.compTableWidget.selectionModel().selectedRows()
+
+        # Check if any rows are selected
+        if not selected_rows:
+            self.alert_box("No comps selected", "Please select some comps to apply the changes to")
+            return
+
+        logger.debug("Updating selected rows to match current row: %s" % current_row)
+        # Apply the changes to the selected rows
+        for row in selected_rows:
+            if row.row() != current_row:  # Avoid self-updating
+                logger.debug("Updating row: %s" % row.row())
+                # Set the frame range
+                frame_range = self.ui.compTableWidget.cellWidget(row.row(), 3)
+                frame_range.setCurrentIndex(frame_range.findText(current_frame_range))
+
+                # Set the frame range text
+                if current_frame_range == self.CUSTOM_TEXT or current_frame_range == self.SINGLE_FRAME_TEXT:
+                    frame_range_text = self.ui.compTableWidget.cellWidget(row.row(), 2)
+                    frame_range_text.setText(current_frame_range_text)
+
+                # Set the render format
+                render_format = self.ui.compTableWidget.cellWidget(row.row(), 4)
+                render_format.setCurrentIndex(render_format.findText(current_render_format))
+
+                # Set the use comp name checkbox
+                use_comp_name = self.ui.compTableWidget.item(row.row(), 5)
+                use_comp_name.setCheckState(current_use_comp_name)
+
+                # Set the include checkbox
+                include = self.ui.compTableWidget.item(row.row(), 6)
+                include.setCheckState(current_include)
+
+    ####################################################################################################
+    # Context Manager
+    ################################################################################################
     @contextmanager
     def supress_dialogs(self):
         """
