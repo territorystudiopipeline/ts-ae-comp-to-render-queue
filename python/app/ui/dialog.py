@@ -14,27 +14,10 @@ from tank.platform.qt import QtCore, QtGui
 class DraggableTableWidget(QtGui.QTableWidget):
     def __init__(self, parent=None):
         super(DraggableTableWidget, self).__init__(parent)
-        #TODO: Implement drag and drop functionality
-        #self.setDragEnabled(True)
-        #self.setAcceptDrops(True)
-        #self.setDragDropMode(QtGui.QTableWidget.InternalMove)
+
         self.setSelectionBehavior(QtGui.QTableWidget.SelectRows)
         self.setSelectionMode(QtGui.QTableWidget.MultiSelection)
 
-    def dropEvent(self, event):
-        source_row = self.currentRow()
-        target_row = self.rowAt(event.pos().y())
-
-        if target_row == -1:
-            target_row = self.rowCount() - 1
-
-        if source_row != target_row:
-            self.insertRow(target_row)
-            for column in range(self.columnCount()):
-                self.setItem(target_row, column, self.takeItem(source_row, column))
-            self.removeRow(source_row)
-
-        event.accept()
 
 class Ui_Dialog(object):
     def setupUi(self, Dialog):
@@ -65,6 +48,28 @@ class Ui_Dialog(object):
         header.setSectionResizeMode(5, QtGui.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QtGui.QHeaderView.ResizeToContents)
 
+        # Set column width
+        self.compTableWidget.setColumnWidth(0, 200)
+
+        # Create Actions
+        self.jumpToCompAction = QtGui.QAction("Jump to Comp", self.compTableWidget)
+        self.removeCompAction = QtGui.QAction("Remove Comp", self.compTableWidget)
+        self.removeSelectedCompsAction = QtGui.QAction("Remove Selected Comps", self.compTableWidget)
+        self.matchSelectedCompsAction = QtGui.QAction("Match Selected Comps", self.compTableWidget)
+
+        # Context Menu
+        self.contextMenu = QtGui.QMenu()
+        self.contextMenu.setObjectName("contextMenu")
+        self.contextMenu.addAction(self.matchSelectedCompsAction)
+        self.contextMenu.addAction(self.jumpToCompAction)
+        self.contextMenu.addAction(self.removeCompAction)
+        self.contextMenu.addAction(self.removeSelectedCompsAction)
+
+        # Add Right Click Menu
+        self.compTableWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
+        self.compTableWidget.customContextMenuRequested.connect(self.showContextMenu)
+
+        # Add Table to Layout
         self.mainLayout.addWidget(self.compTableWidget)
 
         # Buttons
@@ -105,6 +110,15 @@ class Ui_Dialog(object):
 
         self.retranslateUi(Dialog)
         QtCore.QMetaObject.connectSlotsByName(Dialog)
+
+    def showContextMenu(self, pos):
+        """
+            Show context menu for the comp table
+
+            Args:
+                pos (QPoint): The position of the right click
+        """
+        self.contextMenu.exec_(self.compTableWidget.mapToGlobal(pos))
 
     def retranslateUi(self, Dialog):
         _translate = QtCore.QCoreApplication.translate
