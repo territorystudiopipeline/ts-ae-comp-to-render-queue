@@ -10,6 +10,12 @@
 
 
 from tank.platform.qt import QtCore, QtGui
+import os
+import sgtk
+
+# standard toolkit logger
+logger = sgtk.platform.get_logger(__name__)
+
 
 class DraggableTableWidget(QtGui.QTableWidget):
     def __init__(self, parent=None):
@@ -19,8 +25,512 @@ class DraggableTableWidget(QtGui.QTableWidget):
         self.setSelectionMode(QtGui.QTableWidget.MultiSelection)
 
 
+class CollapsiblePanel(QtGui.QWidget):
+    """
+        A collapsible panel with a toggle button and a content frame
+        that can be shown or hidden.
+    """
+    def __init__(self, title="Panel", layout=QtGui.QVBoxLayout):
+        super().__init__()
+        self.main_layout = QtGui.QVBoxLayout(self)
+        self.toggle_button = QtGui.QPushButton(f"▼ {title}")
+        self.toggle_button.clicked.connect(self.toggle_panel)
+
+        self.content_frame = QtGui.QFrame()
+        self.content_frame.setLayout(layout())
+        self.content_frame.setVisible(True)
+
+        self.main_layout.addWidget(self.toggle_button)
+        self.main_layout.addWidget(self.content_frame)
+
+    def toggle_panel(self):
+        is_visible = self.content_frame.isVisible()
+        self.content_frame.setVisible(not is_visible)
+        self.toggle_button.setText(f"{'▼' if not is_visible else '▶'} {self.toggle_button.text()[2:]}")
+
+    def add_widget(self, widget):
+        self.content_frame.layout().addWidget(widget)
+
+    def add_layout(self, layout):
+        self.content_frame.layout().addLayout(layout)
+
+    def setObjectName(self, name):
+        super().setObjectName(name)
+        self.toggle_button.setObjectName(f"{name}_toggle_button")
+        self.content_frame.setObjectName(f"{name}_content_frame")
+        self.main_layout.setObjectName(f"{name}_main_layout")
+
+
+class LineEditSlider(QtGui.QWidget):
+    """
+        A custom QLineEdit With a slider and a label
+    """
+
+    def __init__(self, parent=None):
+        super(LineEditSlider, self).__init__(parent)
+        self.line_edit = QtGui.QLineEdit(self)
+        self.line_edit.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
+        self.line_edit.setPlaceholderText("0")
+        self.line_edit.setToolTip("Enter a value")
+        self.line_edit.setValidator(QtGui.QIntValidator(0, 100, self))
+        self.line_edit.setAlignment(QtCore.Qt.AlignCenter)
+        self.line_edit.setText("0")
+        self.line_edit.setObjectName("line_edit_slider")
+        self.setObjectName("line_edit_slider")
+
+        # Create a slider
+        self.slider = QtGui.QSlider(QtCore.Qt.Horizontal, self)
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(100)
+        self.slider.setValue(0)
+        self.slider.setSingleStep(1)
+        self.slider.setPageStep(1)
+        self.slider.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
+        self.slider.setMinimumWidth(200)
+        self.slider.setObjectName("slider")
+        self.slider.setToolTip("Use the slider to set a value")
+        self.slider.setEnabled(True)
+        self.slider.setTracking(True)
+        self.slider.setFocusPolicy(QtCore.Qt.StrongFocus)
+
+        # Create a label
+        self.label = QtGui.QLabel(self)
+        self.label.setText("Slider Value:")
+        self.label.setAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignVCenter)
+        self.label.setObjectName("label")
+        self.label.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
+        self.label.setToolTip("Slider Value")
+
+        # Create a layout
+        self.layout = QtGui.QHBoxLayout(self)
+        self.layout.setObjectName("line_edit_slider_layout")
+        self.layout.addWidget(self.label)
+        self.layout.addWidget(self.line_edit)
+        self.layout.addWidget(self.slider)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(5)
+        self.setLayout(self.layout)
+
+        # connect the slider to the line edit
+        self.slider.valueChanged.connect(self.update_line_edit_from_slider)
+        self.line_edit.textChanged.connect(self.update_slider_from_line_edit)
+
+    def update_line_edit_from_slider(self, value):
+        self.line_edit.setText(str(value))
+
+    def update_slider_from_line_edit(self, text):
+        if text.isdigit():
+            self.slider.setValue(int(text))
+
+    def set_value(self, value):
+        """
+            Set the value of the line edit and slider
+
+            Args:
+                value (int): The value to set the line edit and slider to
+        """
+        self.line_edit.setText(str(value))
+        self.slider.setValue(value)
+
+    def get_value(self):
+        """
+            Get the value of the line edit
+
+            Returns:
+                int: The value of the line edit
+        """
+        return int(self.line_edit.text())
+
+    def set_label_text(self, text):
+        """
+            Set the label text
+
+            Args:
+                text (str): The text to set the label to
+        """
+        self.label.setText(text)
+
+    def set_slider_range(self, min_value, max_value):
+        """
+            Set the slider range
+
+            Args:
+                min_value (int): The minimum value of the slider
+                max_value (int): The maximum value of the slider
+        """
+        self.slider.setMinimum(min_value)
+        self.slider.setMaximum(max_value)
+
+
+class LineEditButton(QtGui.QWidget):
+    """
+        A custom QLineEdit with a button
+    """
+
+    def __init__(self, parent=None):
+        super(LineEditButton, self).__init__(parent)
+        self.line_edit = QtGui.QLineEdit(self)
+        self.line_edit.setObjectName("line_edit_button")
+        self.line_edit.setAlignment(QtCore.Qt.AlignCenter)
+
+        # Create a button
+        self.button = QtGui.QPushButton(self)
+        self.button.setText("...")
+        self.button.setObjectName("button")
+        self.button.setMaximumWidth(20)
+        self.button.setMaximumHeight(20)
+
+        # Create a layout
+        self.layout = QtGui.QHBoxLayout(self)
+        self.layout.addWidget(self.line_edit)
+        self.layout.addWidget(self.button)
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(2)
+        self.setLayout(self.layout)
+
+    def set_text(self, text):
+        """
+            Set the text of the line edit
+
+            Args:
+                text (str): The text to set the line edit to
+        """
+        self.line_edit.setText(text)
+
+    def get_text(self):
+        """
+            Get the text of the line edit
+
+            Returns:
+                str: The text of the line edit
+        """
+        return self.line_edit.text()
+
+    def set_placeholder_text(self, text):
+        """
+            Set the placeholder text of the line edit
+
+            Args:
+                text (str): The placeholder text to set
+        """
+        self.line_edit.setPlaceholderText(text)
+
+    def set_tooltip(self, text):
+        """
+            Set the tooltip of the line edit
+
+            Args:
+                text (str): The tooltip text to set
+        """
+        self.line_edit.setToolTip(text)
+
+
+class ItemSelectionDialog(QtGui.QDialog):
+    """
+        A QDialog that displays a list of items and allows the user to
+        add them to a selected list.
+    """
+    def __init__(self, parent=None, item_list=None, widget=None):
+        super(ItemSelectionDialog, self).__init__(parent)
+
+        logger.debug("Item selection dialog initializing")
+
+        if item_list is None:
+            item_list = []
+        # clean the item list
+        item_list = self.remove_empty_items_from_list(item_list)
+        if widget is None:
+            raise ValueError("Widget cannot be None")
+        self.widget = widget
+
+        # Set the dialog properties
+        self.setModal(True)
+        self.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
+        self.setMinimumSize(QtCore.QSize(400, 200))
+        self.setLayout(QtGui.QVBoxLayout())
+
+        # List Layout
+        self.list_layout = QtGui.QHBoxLayout(self)
+        self.list_layout.setObjectName("list_layout")
+        self.list_layout.setContentsMargins(10, 10, 10, 10)
+        self.list_layout.setSpacing(5)
+
+        # selected List Layout
+        self.selected_list_layout = QtGui.QVBoxLayout(self)
+        self.selected_list_layout.setObjectName("selected_list_layout")
+
+        # Available List Layout
+        self.available_list_layout = QtGui.QVBoxLayout(self)
+        self.available_list_layout.setObjectName("available_list_layout")
+
+        # Machine List
+        self.available_list_label = QtGui.QLabel("Available Items", self)
+        self.available_list = QtGui.QListWidget(self)
+
+        self.available_list_layout.addWidget(self.available_list_label)
+        self.available_list_layout.addWidget(self.available_list)
+
+        # selected List
+        self.selected_list_label = QtGui.QLabel("Selected Items", self)
+        self.selected_list = QtGui.QListWidget(self)
+
+        self.selected_list_layout.addWidget(self.selected_list_label)
+        self.selected_list_layout.addWidget(self.selected_list)
+
+        # Buttons
+        self.button_layout = QtGui.QVBoxLayout(self)
+
+        self.add_button = QtGui.QPushButton(">", self)
+        self.add_button.setToolTip("Add selected items to the selected list")
+        self.add_button.setMaximumHeight(30)
+
+        self.remove_button = QtGui.QPushButton("<", self)
+        self.remove_button.setToolTip("Remove selected items from the selected list")
+        self.remove_button.setMaximumHeight(30)
+
+        self.move_up_button = QtGui.QPushButton("^", self)
+        self.move_up_button.setToolTip("Move selected machine up")
+        self.move_up_button.setMaximumHeight(30)
+
+        self.move_down_button = QtGui.QPushButton("v", self)
+        self.move_down_button.setToolTip("Move selected machine down")
+        self.move_down_button.setMaximumHeight(30)
+
+        # Add buttons to the button layout
+        self.button_layout.addStretch()
+        self.button_layout.addWidget(self.add_button)
+        self.button_layout.addWidget(self.remove_button)
+        self.button_layout.addWidget(self.move_up_button)
+        self.button_layout.addWidget(self.move_down_button)
+        self.button_layout.addStretch()
+
+        # Add to List Layout
+        self.list_layout.addLayout(self.available_list_layout)
+        self.list_layout.addLayout(self.button_layout)
+        self.list_layout.addLayout(self.selected_list_layout)
+
+        # Accept and Cancel Buttons
+        self.button_layout_2 = QtGui.QHBoxLayout(self)
+        self.button_layout_2.setObjectName("button_layout_2")
+        self.accept_button = QtGui.QPushButton("Accept", self)
+        self.cancel_button = QtGui.QPushButton("Cancel", self)
+
+        self.button_layout_2.addStretch()
+        self.button_layout_2.addWidget(self.accept_button)
+        self.button_layout_2.addWidget(self.cancel_button)
+        self.button_layout_2.addStretch()
+
+        self.layout().addLayout(self.list_layout)
+        self.layout().addLayout(self.button_layout_2)
+        self.layout().setContentsMargins(5, 5, 5, 5)
+        self.layout().setSpacing(5)
+
+        # Set the initial machine list
+        logger.debug("Populating the available list")
+        self.populate_available_list(item_list)
+
+        # Set the selected machine list
+        logger.debug("Populating the selected list")
+        self.populate_from_widget()
+
+        # Connect buttons to functions
+        self.add_button.clicked.connect(self.add_item)
+        self.remove_button.clicked.connect(self.remove_item)
+        self.move_up_button.clicked.connect(self.move_up_item)
+        self.move_down_button.clicked.connect(self.move_down_item)
+        self.accept_button.clicked.connect(self.accept)
+        self.cancel_button.clicked.connect(self.cancel)
+
+        logger.debug("Item list dialog initialized")
+
+    def add_item(self):
+        """
+            Add a machine to the selected list
+        """
+        self.move_items_between_lists(self.available_list, self.selected_list)
+
+    def remove_item(self):
+        """
+            Remove a machine from the selected list
+        """
+        self.move_items_between_lists(self.selected_list, self.available_list)
+
+    def move_up_item(self):
+        """
+            Move a machine up in the selected list
+        """
+        self.move_item(self.selected_list, "up")
+
+    def move_down_item(self):
+        """
+            Move a machine down in the selected list
+        """
+        self.move_item(self.selected_list, "down")
+
+    def get_selected_items(self):
+        """
+            Get the selected items.
+
+            Returns:
+                list: The list of selected items.
+        """
+        selected_items = []
+        for i in range(self.selected_list.count()):
+            selected_items.append(self.selected_list.item(i).text())
+        return selected_items
+
+    def selected_items_to_string(self):
+        """
+            Convert the selected machines to a string
+
+            Returns:
+                str: The string of selected machines
+        """
+        selected_items = self.get_selected_items()
+        string = self.item_list_to_string(selected_items)
+        return string
+
+    def populate_available_list(self, item_list):
+        """
+            Populate the available list.
+
+            Args:
+                item_list (list): The list of items to set.
+        """
+        self.available_list.clear()
+        self.available_list.addItems(item_list)
+
+    def populate_selected_list(self, selected_items):
+        """
+            Populate the selected list and remove them from the available list.
+
+            Args:
+                selected_items (list): The list of selected items to set.
+        """
+        self.selected_list.clear()
+        self.selected_list.addItems(selected_items)
+        logger.debug(" selected List Updated: %s", selected_items)
+        # Remove selected machines from available list
+        logger.debug("Removing selected machines from available list")
+        for machine in selected_items:
+            for i in range(self.available_list.count()):
+                if self.available_list.item(i).text() == machine:
+                    self.available_list.takeItem(i)
+                    break
+
+    def populate_from_widget(self):
+        """
+            Populate the available and selected lists from a widget.
+        """
+        logger.debug("Populating item lists from widget")
+        if isinstance(self.widget, (LineEditButton, QtGui.QLineEdit)):
+            item_list = self.string_to_item_list(
+                self.widget.get_text() if isinstance(self.widget, LineEditButton) else self.widget.text())
+            self.populate_selected_list(item_list)
+
+    def accept(self):
+        """
+            Accept the dialog and return the selected machines
+        """
+        selected_string = self.selected_items_to_string()
+
+        if isinstance(self.widget, LineEditButton):
+            self.widget.set_text(selected_string)
+        elif isinstance(self.widget, QtGui.QLineEdit):
+            self.widget.setText(selected_string)
+        else:
+            pass
+        self.close()
+
+    def cancel(self):
+        """
+            Cancel the dialog
+        """
+        self.close()
+
+    ###################
+    # Static Helper Methods
+    ###################
+    @staticmethod
+    def string_to_item_list(item_string):
+        """
+            Convert a string to a list of machines
+
+            Args:
+                item_string (str): The string of machines to convert
+        """
+        machine_list = item_string.split(",")
+        return machine_list
+
+    @staticmethod
+    def item_list_to_string(item_list):
+        """
+            Convert a list of items to a string
+
+            Args:
+                item_list (list): The list of item to convert
+        """
+        return ",".join(item_list)
+
+    @staticmethod
+    def move_item(list_widget, direction):
+        """
+            Move an item in the list
+
+            Args:
+                list_widget (QListWidget): The list widget to move the item in
+                direction (str): The direction to move the item in
+        """
+        selected_items = list_widget.selectedItems()
+        for item in selected_items:
+            row = list_widget.row(item)
+            if direction == "up" and row > 0:
+                item_text = item.text()
+                list_widget.takeItem(row)
+                list_widget.insertItem(row - 1, item_text)
+                list_widget.setCurrentRow(row - 1)
+            elif direction == "down" and row < list_widget.count() - 1:
+                item_text = item.text()
+                list_widget.takeItem(row)
+                list_widget.insertItem(row + 1, item_text)
+                list_widget.setCurrentRow(row + 1)
+
+    @staticmethod
+    def move_items_between_lists(source_list, target_list):
+        """
+            Move selected items from source list to target list
+        """
+        selected_items = source_list.selectedItems()
+        for item in selected_items:
+            if item != "" or item not in target_list:
+                # Add item to target list
+                target_list.addItem(item.text())
+                source_list.takeItem(source_list.row(item))
+                target_list.item(target_list.count() - 1).setSelected(True)
+                target_list.scrollToBottom()
+        target_list.setFocus()
+
+    @staticmethod
+    def remove_empty_items_from_list(item_list):
+        """
+            Remove empty items from a list
+
+            Args:
+                item_list (list): The list of items to remove empty items from
+        """
+        return [item for item in item_list if item.strip() != ""]
+
+
 class Ui_Dialog(object):
     def setupUi(self, Dialog):
+        """
+            Setup the UI for the dialog
+            Args:
+                Dialog (QDialog): The dialog to setup
+        """
+
+        logger.debug("Setting up the UI for the dialog")
+
         Dialog.setObjectName("Dialog")
         Dialog.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
         Dialog.setMinimumSize(QtCore.QSize(800, 600))
@@ -30,9 +540,27 @@ class Ui_Dialog(object):
         self.mainLayout = QtGui.QVBoxLayout()
         self.mainLayout.setObjectName("mainLayout")
 
+        # Get the directory of the current script
+        script_dir = os.path.dirname(__file__)
+
+        # Construct the relative paths to the icons
+        warning_icon_path = os.path.join(script_dir, 'icons', 'warning_icon.png')
+        clear_icon_path = os.path.join(script_dir, 'icons', 'clear_icon.png')
+        error_icon_path = os.path.join(script_dir, 'icons', 'error_icon.png')
+        submit_icon_path = os.path.join(script_dir, 'icons', 'submit_icon.png')
+
+        # Static Icons
+        self.warningIcon = QtGui.QIcon()
+        self.warningIcon.addPixmap(QtGui.QPixmap(warning_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.clearIcon = QtGui.QIcon()
+        self.clearIcon.addPixmap(QtGui.QPixmap(clear_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.errorIcon = QtGui.QIcon()
+        self.errorIcon.addPixmap(QtGui.QPixmap(error_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.submitIcon = QtGui.QIcon()
+        self.submitIcon.addPixmap(QtGui.QPixmap(submit_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+
         # Comp Table
         self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Use Comp Name", "Include"]
-
         self.compTableWidget = DraggableTableWidget(Dialog)
         self.compTableWidget.setObjectName("compTableWidget")
         self.compTableWidget.setColumnCount(len(self.compTableHeaders))
@@ -48,22 +576,46 @@ class Ui_Dialog(object):
         header.setSectionResizeMode(5, QtGui.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QtGui.QHeaderView.ResizeToContents)
 
+        # Set Initial column width
+        self.compTableWidget.setColumnWidth(1, 200)
+
         # Set column width
         self.compTableWidget.setColumnWidth(0, 200)
+
+        # Progress Bar
+        self.progressBar = QtGui.QProgressBar(Dialog)
+        self.progressBar.setObjectName("progressBar")
+        self.progressBar.setValue(0)
+        self.progressBar.setMaximum(100)
+        self.progressBar.setMinimum(0)
+        self.progressBar.setTextVisible(True)
+        self.progressBar.setFormat("%p%")
+        self.progressBar.setOrientation(QtCore.Qt.Horizontal)
+        self.progressBar.setAlignment(QtCore.Qt.AlignCenter)
+        self.progressBar.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
+        self.progressBar.setMinimumHeight(30)
+        self.progressBar.setMaximumHeight(30)
+        self.progressBar.setMinimumWidth(300)
+        self.progressBar.hide()
 
         # Create Actions
         self.jumpToCompAction = QtGui.QAction("Jump to Comp", self.compTableWidget)
         self.removeCompAction = QtGui.QAction("Remove Comp", self.compTableWidget)
         self.removeSelectedCompsAction = QtGui.QAction("Remove Selected Comps", self.compTableWidget)
         self.matchSelectedCompsAction = QtGui.QAction("Match Selected Comps", self.compTableWidget)
+        self.refreshAction = QtGui.QAction("Refresh", self.compTableWidget)
 
         # Context Menu
         self.contextMenu = QtGui.QMenu()
         self.contextMenu.setObjectName("contextMenu")
         self.contextMenu.addAction(self.matchSelectedCompsAction)
+        self.contextMenu.addAction(self.removeSelectedCompsAction)
+        self.contextMenu.addSeparator()
         self.contextMenu.addAction(self.jumpToCompAction)
         self.contextMenu.addAction(self.removeCompAction)
-        self.contextMenu.addAction(self.removeSelectedCompsAction)
+        self.contextMenu.addSeparator()
+        self.contextMenu.addAction(self.refreshAction)
+
 
         # Add Right Click Menu
         self.compTableWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
@@ -72,9 +624,465 @@ class Ui_Dialog(object):
         # Add Table to Layout
         self.mainLayout.addWidget(self.compTableWidget)
 
+        # Collapsible Panel
+        self.deadlinePanel = CollapsiblePanel("Deadline Settings", QtGui.QVBoxLayout)
+        self.deadlinePanel.setObjectName("deadlinePanel")
+        self.mainLayout.addWidget(self.deadlinePanel)
+
+        # Create Tab Widget
+        self.tabWidget = QtGui.QTabWidget(self.deadlinePanel)
+        self.tabWidget.setObjectName("tabWidget")
+        self.tabWidget.setGeometry(QtCore.QRect(10, 10, 400, 300))
+
+        ##############################################
+        # Deadline
+        ##############################################
+
+        logger.debug("Creating Deadline Panel")
+
+        # Create Deadline Base Settings Tab
+        self.deadlineBaseSettingsTab = QtGui.QWidget()
+        self.deadlineBaseSettingsTab.setObjectName("deadlineBaseSettingsTab")
+        self.tabWidget.addTab(self.deadlineBaseSettingsTab, "Settings")
+        self.deadlineBaseSettingsTab.setLayout(QtGui.QVBoxLayout())
+        self.deadlineBaseSettingsTab.layout().setContentsMargins(0, 10, 0, 0)
+        self.deadlineBaseSettingsTab.layout().setSpacing(0)
+
+        # Create Deadline Advanced Settings Tab
+        self.deadlineAdvancedSettingsTab = QtGui.QWidget()
+        self.deadlineAdvancedSettingsTab.setObjectName("deadlineAdvancedSettingsTab")
+        self.tabWidget.addTab(self.deadlineAdvancedSettingsTab, "Advanced Settings")
+        self.deadlineAdvancedSettingsTab.setLayout(QtGui.QVBoxLayout())
+        self.deadlineAdvancedSettingsTab.layout().setContentsMargins(0, 10, 0, 0)
+        self.deadlineAdvancedSettingsTab.layout().setSpacing(0)
+
+        # Create Deadline Other Options Tab
+        self.deadlineOtherOptionsTab = QtGui.QWidget()
+        self.deadlineOtherOptionsTab.setObjectName("deadlineOtherOptionsTab")
+        self.tabWidget.addTab(self.deadlineOtherOptionsTab, "Other Options")
+        self.deadlineOtherOptionsTab.setLayout(QtGui.QVBoxLayout())
+        self.deadlineOtherOptionsTab.layout().setContentsMargins(0, 0, 0, 0)
+        self.deadlineOtherOptionsTab.layout().setSpacing(0)
+
+        # Add tab widget to the deadline panel
+        self.deadlinePanel.add_widget(self.tabWidget)
+
+        #########################################
+        # Base Settings
+        #########################################
+        # Use Frame List from Comp
+        self.deadline_use_frame_list_from_comp = QtGui.QCheckBox("Use Frame List from The Comp")
+        self.deadline_use_frame_list_from_comp.setObjectName("use_frame_list_from_comp")
+        self.deadline_use_frame_list_from_comp.setToolTip("Use Frame List from The Comp")
+
+        # Frame List
+        self.deadline_frame_list = QtGui.QLineEdit()
+        self.deadline_frame_list.setObjectName("frame_list")
+        self.deadline_frame_list.setPlaceholderText("1001 - 1100")
+        self.deadline_frame_list.setToolTip("Frame List")
+        self.deadline_frame_list.setValidator(
+            QtGui.QRegExpValidator(QtCore.QRegExp("[0-9]+ - [0-9]+"), self.deadline_frame_list))
+        self.deadline_frame_list.setMaxLength(20)
+
+        # Connect the checkbox to enable/disable the frame list line edit
+        self.deadline_use_frame_list_from_comp.toggled.connect(
+            lambda checked: self.deadline_frame_list.setEnabled(not checked))
+        self.deadline_use_frame_list_from_comp.setChecked(True)
+
+        # Frames Per Task
+        self.deadline_frames_per_task = QtGui.QLineEdit()
+        self.deadline_frames_per_task.setObjectName("frames_per_task")
+        self.deadline_frames_per_task.setPlaceholderText("15")
+        self.deadline_frames_per_task.setToolTip("Frames Per Task")
+        self.deadline_frames_per_task.validator = QtGui.QIntValidator(1, 100, self.deadline_frames_per_task)
+
+        ##################
+        # Job Scheduling
+        ##################
+        # Pool
+        self.deadline_pool = QtGui.QComboBox()
+        self.deadline_pool.setObjectName("pool")
+        self.deadline_pool.setToolTip("Pool")
+
+        # Secondary Pool
+        self.deadline_secondary_pool = QtGui.QComboBox()
+        self.deadline_secondary_pool.setObjectName("secondary_pool")
+        self.deadline_secondary_pool.setToolTip("Secondary Pool")
+
+        # Group
+        self.deadline_group = QtGui.QComboBox()
+        self.deadline_group.setObjectName("group")
+        self.deadline_group.setToolTip("Group")
+
+        # Priority
+        self.deadline_priority = QtGui.QLineEdit()
+        self.deadline_priority.setObjectName("priority")
+        self.deadline_priority.setPlaceholderText("30")
+        self.deadline_priority.setToolTip("Priority")
+        self.deadline_priority.validator = QtGui.QIntValidator(0, 100, self.deadline_priority)
+
+        # Machine Limit
+        self.deadline_machine_limit = QtGui.QLineEdit()
+        self.deadline_machine_limit.setObjectName("machine_limit")
+        self.deadline_machine_limit.setPlaceholderText("0")
+        self.deadline_machine_limit.setToolTip("Machine Limit")
+        self.deadline_machine_limit.validator = QtGui.QIntValidator(0, 100, self.deadline_machine_limit)
+
+        # Concurrent Tasks
+        self.deadline_concurrent_tasks = QtGui.QLineEdit()
+        self.deadline_concurrent_tasks.setObjectName("concurrent_tasks")
+        self.deadline_concurrent_tasks.setPlaceholderText("1")
+        self.deadline_concurrent_tasks.setToolTip("Concurrent Tasks")
+        self.deadline_concurrent_tasks.validator = QtGui.QIntValidator(1, 100, self.deadline_concurrent_tasks)
+
+        # Task Timeout
+        self.deadline_task_timeout = QtGui.QLineEdit()
+        self.deadline_task_timeout.setObjectName("task_timeout")
+        self.deadline_task_timeout.setPlaceholderText("0")
+        self.deadline_task_timeout.setToolTip("Task Timeout")
+        self.deadline_task_timeout.validator = QtGui.QIntValidator(0, 100, self.deadline_task_timeout)
+
+        # Limits
+        self.deadline_limits = LineEditButton()
+        self.deadline_limits.setObjectName("limits")
+        self.deadline_limits.set_tooltip("Limits")
+
+        # Dependencies
+        self.deadline_dependencies = LineEditButton()
+        self.deadline_dependencies.setObjectName("dependencies")
+        self.deadline_dependencies.set_tooltip("Dependencies")
+
+        # DISABLING THE DEPENDENCIES LINE EDIT WE ARE NOT SUPPORTING THIS
+        self.deadline_dependencies.setEnabled(False)
+
+        # Machine List
+        self.deadline_machine_list = LineEditButton()
+        self.deadline_machine_list.setObjectName("machine_list")
+        self.deadline_machine_list.set_tooltip("Machine List")
+
+        # On Job Complete
+        self.deadline_on_job_complete = QtGui.QComboBox()
+        self.deadline_on_job_complete.setObjectName("on_job_complete")
+
+        # Submit As Suspended
+        self.deadline_submit_as_suspended = QtGui.QCheckBox("Submit As Suspended")
+        self.deadline_submit_as_suspended.setObjectName("submit_as_suspended")
+        self.deadline_submit_as_suspended.setToolTip("Submit As Suspended")
+
+        # Machine List is a deny list
+        self.deadline_machine_list_deny = QtGui.QCheckBox("Machine List is a Deny List")
+        self.deadline_machine_list_deny.setObjectName("machine_list_deny")
+        self.deadline_machine_list_deny.setToolTip("Machine List is a Deny List")
+
+        # Main Layout for the deadline base settings
+        self.deadlineBaseSettingsLayout = QtGui.QHBoxLayout()
+
+        # Column1
+        self.deadlineBaseSettingsFormLayout1 = QtGui.QFormLayout()
+        self.deadlineBaseSettingsFormLayout1.setContentsMargins(10, 5, 10, 5)
+        self.deadlineBaseSettingsFormLayout1.setSpacing(5)
+
+        # Add the widgets to column1
+        self.deadlineBaseSettingsFormLayout1.addRow("", self.deadline_use_frame_list_from_comp)
+        self.deadlineBaseSettingsFormLayout1.addRow("Frame List:", self.deadline_frame_list)
+        self.deadlineBaseSettingsFormLayout1.addRow("Frames Per Task:", self.deadline_frames_per_task)
+        self.deadlineBaseSettingsFormLayout1.addRow("Pool:", self.deadline_pool)
+        self.deadlineBaseSettingsFormLayout1.addRow("Secondary Pool:", self.deadline_secondary_pool)
+        self.deadlineBaseSettingsFormLayout1.addRow("Group:", self.deadline_group)
+
+        # Column2
+        self.deadlineBaseSettingsFormLayout2 = QtGui.QFormLayout()
+        self.deadlineBaseSettingsFormLayout2.setContentsMargins(10, 5, 10, 5)
+        self.deadlineBaseSettingsFormLayout2.setSpacing(5)
+
+        # Add the widgets to column2
+        self.deadlineBaseSettingsFormLayout2.addRow("Priority:", self.deadline_priority)
+        self.deadlineBaseSettingsFormLayout2.addRow("Machine Limit:", self.deadline_machine_limit)
+        self.deadlineBaseSettingsFormLayout2.addRow("Concurrent Tasks:", self.deadline_concurrent_tasks)
+        self.deadlineBaseSettingsFormLayout2.addRow("Task Timeout:", self.deadline_task_timeout)
+        self.deadlineBaseSettingsFormLayout2.addRow("Limits:", self.deadline_limits)
+        self.deadlineBaseSettingsFormLayout2.addRow("Dependencies:", self.deadline_dependencies)
+
+        # Column3
+        self.deadlineBaseSettingsFormLayout3 = QtGui.QFormLayout()
+        self.deadlineBaseSettingsFormLayout3.setContentsMargins(10, 5, 10, 5)
+        self.deadlineBaseSettingsFormLayout3.setSpacing(5)
+
+        # Add the widgets to column3
+        self.deadlineBaseSettingsFormLayout3.addRow("Machine List:", self.deadline_machine_list)
+        self.deadlineBaseSettingsFormLayout3.addRow("On Job Complete:", self.deadline_on_job_complete)
+        self.deadlineBaseSettingsFormLayout3.addRow("", self.deadline_submit_as_suspended)
+        self.deadlineBaseSettingsFormLayout3.addRow("", self.deadline_machine_list_deny)
+
+        # Add the column layouts to the main layout
+        self.deadlineBaseSettingsLayout.addLayout(self.deadlineBaseSettingsFormLayout1)
+        self.deadlineBaseSettingsLayout.addLayout(self.deadlineBaseSettingsFormLayout2)
+        self.deadlineBaseSettingsLayout.addLayout(self.deadlineBaseSettingsFormLayout3)
+
+        # Add the main layout to the deadline base settings tab
+        self.deadlineBaseSettingsTab.layout().addLayout(self.deadlineBaseSettingsLayout)
+
+        ################################
+        # Advanced Settings
+        ###############################
+
+        # Advanced Settings main layout
+        self.deadlineAdvancedSettingsLayout = QtGui.QVBoxLayout()
+        self.deadlineAdvancedSettingsLayout.setContentsMargins(10, 10, 10, 5)
+        self.deadlineAdvancedSettingsLayout.setSpacing(5)
+        self.deadlineAdvancedSettingsLayout.setObjectName("advanced_settings_layout")
+        self.deadlineAdvancedSettingsTab.layout().addLayout(self.deadlineAdvancedSettingsLayout)
+
+        # Advanced Options layout
+        self.deadlineAdvancedOptionsLayout = QtGui.QHBoxLayout()
+        self.deadlineAdvancedOptionsFrame = QtGui.QGroupBox()
+        self.deadlineAdvancedOptionsFrame.setObjectName("advanced_options_frame")
+        self.deadlineAdvancedOptionsFrame.setLayout(self.deadlineAdvancedOptionsLayout)
+        self.deadlineAdvancedOptionsFrame.setContentsMargins(0, 0, 0, 0)
+        self.deadlineAdvancedOptionsFrame.setTitle("After Effects Advanced Options")
+
+        # Add the advanced options frame to the main layout
+        self.deadlineAdvancedSettingsLayout.addWidget(self.deadlineAdvancedOptionsFrame)
+
+        # Column 1
+        self.deadlineAdvancedOptionsColumn1 = QtGui.QFormLayout()
+        self.deadlineAdvancedOptionsColumn1.setContentsMargins(2, 2, 2, 2)
+        self.deadlineAdvancedOptionsColumn1.setSpacing(5)
+        self.deadlineAdvancedOptionsColumn1.setObjectName("advanced_options_column_1")
+        self.deadlineAdvancedOptionsFrame.layout().addLayout(self.deadlineAdvancedOptionsColumn1)
+
+        # Column 2
+        self.deadlineAdvancedOptionsColumn2 = QtGui.QFormLayout()
+        self.deadlineAdvancedOptionsColumn2.setContentsMargins(2, 2, 2, 2)
+        self.deadlineAdvancedOptionsColumn2.setSpacing(5)
+        self.deadlineAdvancedOptionsColumn2.setObjectName("advanced_options_column_2")
+        self.deadlineAdvancedOptionsFrame.layout().addLayout(self.deadlineAdvancedOptionsColumn2)
+
+        # Column 3
+        self.deadlineAdvancedOptionsColumn3 = QtGui.QFormLayout()
+        self.deadlineAdvancedOptionsColumn3.setContentsMargins(2, 2, 2, 2)
+        self.deadlineAdvancedOptionsColumn3.setSpacing(5)
+        self.deadlineAdvancedOptionsColumn3.setObjectName("advanced_options_column_3")
+        self.deadlineAdvancedOptionsFrame.layout().addLayout(self.deadlineAdvancedOptionsColumn3)
+
+        # Comps are dependent on previous comps
+        self.deadline_comps_dependent = QtGui.QCheckBox("Comps Are Dependent On Previous Comps")
+        self.deadline_comps_dependent.setObjectName("comps_dependent")
+
+        # Submit Entire Render Queue As One Job
+        self.deadline_submit_entire_render_queue = QtGui.QCheckBox("Submit Entire Render Queue As One Job")
+        self.deadline_submit_entire_render_queue.setObjectName("submit_entire_render_queue")
+
+        # Ignore Missing Layer Dependencies
+        self.deadline_ignore_missing_layer_dependencies = QtGui.QCheckBox("Ignore Missing Layer Dependencies")
+        self.deadline_ignore_missing_layer_dependencies.setObjectName("ignore_missing_layer_dependencies")
+
+        # Ignore Missing Effect References
+        self.deadline_ignore_missing_effect_references = QtGui.QCheckBox("Ignore Missing Effect References")
+        self.deadline_ignore_missing_effect_references.setObjectName("ignore_missing_effect_references")
+
+        # Override Fail On Existing AE Process
+        self.deadline_override_fail_on_existing_ae_process = QtGui.QCheckBox("Override Fail On Existing AE Process")
+        self.deadline_override_fail_on_existing_ae_process.setObjectName("override_fail_on_existing_ae_process")
+
+        # Ignore GPU Acceleration Warning
+        self.deadline_ignore_gpu_acceleration_warning = QtGui.QCheckBox("Ignore GPU Acceleration Warning")
+        self.deadline_ignore_gpu_acceleration_warning.setObjectName("ignore_gpu_acceleration_warning")
+
+        # Render First And Last Frames of The Comp First
+        self.deadline_render_first_and_last_frames = QtGui.QCheckBox(
+            "Render First And Last Frames of The Comp First")
+        self.deadline_render_first_and_last_frames.setObjectName("render_first_and_last_frames")
+        self.deadline_render_first_and_last_frames.setEnabled(False)
+
+        # Multi-Process Rendering
+        self.deadline_multi_process_rendering = QtGui.QCheckBox("Multi-Process Rendering")
+        self.deadline_multi_process_rendering.setObjectName("multi_process_rendering")
+
+        # Fail On Warning Messages
+        self.deadline_fail_on_warning_messages = QtGui.QCheckBox("Fail On Warning Messages")
+        self.deadline_fail_on_warning_messages.setObjectName("fail_on_warning_messages")
+
+        # Continue On Missing Footage
+        self.deadline_continue_on_missing_footage = QtGui.QCheckBox("Continue On Missing Footage")
+        self.deadline_continue_on_missing_footage.setObjectName("continue_on_missing_footage")
+
+        # Fail On Existing AE Process
+        self.deadline_fail_on_existing_ae_process = QtGui.QCheckBox("Fail On Existing AE Process")
+        self.deadline_fail_on_existing_ae_process.setObjectName("fail_on_existing_ae_process")
+
+        # Include Output File Path
+        self.deadline_include_output_file_path = QtGui.QCheckBox("Include Output File Path")
+        self.deadline_include_output_file_path.setObjectName("include_output_file_path")
+
+        # Submit Project File With Job
+        self.deadline_submit_project_file_with_job = QtGui.QCheckBox("Submit Project File With Job")
+        self.deadline_submit_project_file_with_job.setObjectName("submit_project_file_with_job")
+
+        # Export XML Project File
+        self.deadline_export_xml_project_file = QtGui.QCheckBox("Export XML Project File")
+        self.deadline_export_xml_project_file.setObjectName("export_xml_project_file")
+
+        # Delete XML File After Export
+        self.deadline_delete_xml_file_after_export = QtGui.QCheckBox("Delete XML File After Export")
+        self.deadline_delete_xml_file_after_export.setObjectName("delete_xml_file_after_export")
+        self.deadline_delete_xml_file_after_export.setEnabled(False)
+
+        # Enable Local Rendering
+        self.deadline_enable_local_rendering = QtGui.QCheckBox("Enable Local Rendering")
+        self.deadline_enable_local_rendering.setObjectName("enable_local_rendering")
+        # Disable editing
+        self.deadline_enable_local_rendering.setEnabled(False)
+
+        # Add the widgets to the columns
+        # Column 1
+        self.deadlineAdvancedOptionsColumn1.addRow("", self.deadline_comps_dependent)
+        self.deadlineAdvancedOptionsColumn1.addRow("", self.deadline_submit_entire_render_queue)
+        self.deadlineAdvancedOptionsColumn1.addRow("", self.deadline_ignore_missing_layer_dependencies)
+        self.deadlineAdvancedOptionsColumn1.addRow("", self.deadline_ignore_missing_effect_references)
+        self.deadlineAdvancedOptionsColumn1.addRow("", self.deadline_override_fail_on_existing_ae_process)
+        self.deadlineAdvancedOptionsColumn1.addRow("", self.deadline_ignore_gpu_acceleration_warning)
+        # Column 2
+        self.deadlineAdvancedOptionsColumn2.addRow("", self.deadline_render_first_and_last_frames)
+        self.deadlineAdvancedOptionsColumn2.addRow("", self.deadline_multi_process_rendering)
+        self.deadlineAdvancedOptionsColumn2.addRow("", self.deadline_fail_on_warning_messages)
+        self.deadlineAdvancedOptionsColumn2.addRow("", self.deadline_continue_on_missing_footage)
+        self.deadlineAdvancedOptionsColumn2.addRow("", self.deadline_fail_on_existing_ae_process)
+        self.deadlineAdvancedOptionsColumn2.addRow("", self.deadline_include_output_file_path)
+        # Column 3
+        self.deadlineAdvancedOptionsColumn3.addRow("", self.deadline_submit_project_file_with_job)
+        self.deadlineAdvancedOptionsColumn3.addRow("", self.deadline_export_xml_project_file)
+        self.deadlineAdvancedOptionsColumn3.addRow("", self.deadline_delete_xml_file_after_export)
+        self.deadlineAdvancedOptionsColumn3.addRow("", self.deadline_enable_local_rendering)
+
+        ##################################
+        # Other Options
+        #################################
+        # Other Options main layout
+        self.deadlineOtherOptionsLayout = QtGui.QVBoxLayout()
+        self.deadlineOtherOptionsLayout.setContentsMargins(10, 5, 10, 5)
+        self.deadlineOtherOptionsLayout.setSpacing(5)
+        self.deadlineOtherOptionsLayout.setObjectName("other_options_layout")
+        self.deadlineOtherOptionsTab.layout().addLayout(self.deadlineOtherOptionsLayout)
+
+        # Horizontal Layout for the other options
+        self.deadlineOtherOptionsLayout1 = QtGui.QHBoxLayout()
+
+        # Multi-Machine Rendering Frame
+        self.deadlineMultiMachineFrame = QtGui.QGroupBox()
+        self.deadlineMultiMachineFrame.setObjectName("multi_machine_frame")
+        self.deadlineMultiMachineFrame.setTitle("Multi-Machine Rendering")
+        self.deadlineMultiMachineLayout = QtGui.QVBoxLayout()
+        self.deadlineMultiMachineFrame.setLayout(self.deadlineMultiMachineLayout)
+
+        # Multi-Machine Rendering Options
+        self.deadline_multi_machine_rendering = QtGui.QCheckBox("Enable Multi-Machine Rendering")
+        self.deadline_multi_machine_rendering.setObjectName("multi_machine_rendering")
+        self.deadline_multi_machine_number_of_machines = LineEditSlider()
+        self.deadline_multi_machine_number_of_machines.setObjectName("multi_machine_number_of_machines")
+        self.deadline_multi_machine_number_of_machines.set_label_text("Number of Machines:")
+        self.deadline_multi_machine_number_of_machines.set_slider_range(1, 100)
+        self.deadline_multi_machine_number_of_machines.set_value(10)
+        self.deadline_multi_machine_number_of_machines.setToolTip("Number of Machines")
+        self.deadline_multi_machine_number_of_machines.setEnabled(False)
+
+        # Add the widgets to the multi-machine frame
+        self.deadlineMultiMachineLayout.addWidget(self.deadline_multi_machine_rendering)
+        self.deadlineMultiMachineLayout.addWidget(self.deadline_multi_machine_number_of_machines)
+        self.deadline_multi_machine_rendering.toggled.connect(
+            lambda: self.deadline_multi_machine_number_of_machines.setEnabled(
+                self.deadline_multi_machine_rendering.isChecked()
+            )
+        )
+        # Output file checking
+        self.deadlineOutputFileChecking = QtGui.QGroupBox()
+        self.deadlineOutputFileChecking.setObjectName("output_file_checking")
+        self.deadlineOutputFileChecking.setTitle("Output File Checking")
+        self.deadlineOutputFileChecking.setToolTip("Output File Checking")
+        self.deadlineOutputFileCheckingLayout = QtGui.QVBoxLayout()
+        self.deadlineOutputFileChecking.setLayout(self.deadlineOutputFileCheckingLayout)
+
+        # Output File Checking Options
+        self.deadline_minimum_file_size = LineEditSlider()
+        self.deadline_minimum_file_size.setObjectName("minimum_file_size")
+        self.deadline_minimum_file_size.set_label_text("Minimum File Size(KB):")
+        self.deadline_minimum_file_size.set_slider_range(0, 100000)
+        self.deadline_minimum_file_size.set_value(0)
+        self.deadline_minimum_file_size.setToolTip("Minimum File Size")
+
+        self.deadline_delete_files_under_minimum_size = QtGui.QCheckBox("Delete Files Under Minimum File Size")
+        self.deadline_delete_files_under_minimum_size.setObjectName("delete_files_under_minimum_size")
+        self.deadline_delete_files_under_minimum_size.setToolTip("Delete Files Under Minimum File Size")
+
+        self.deadline_fail_on_missing_output = QtGui.QCheckBox("Fail On Missing Output")
+        self.deadline_fail_on_missing_output.setObjectName("fail_on_missing_output")
+        self.deadline_fail_on_missing_output.setToolTip("Fail On Missing Output")
+        self.deadline_fail_on_missing_output.setChecked(True)
+
+        # Add the widgets to the output file checking frame
+        self.deadlineOutputFileCheckingLayout.addWidget(self.deadline_minimum_file_size)
+        self.deadlineOutputFileCheckingLayout.addWidget(self.deadline_delete_files_under_minimum_size)
+        self.deadlineOutputFileCheckingLayout.addWidget(self.deadline_fail_on_missing_output)
+
+        # Memory Management Frame
+        self.deadlineMemoryManagementFrame = QtGui.QGroupBox()
+        self.deadlineMemoryManagementFrame.setObjectName("memory_management_frame")
+        self.deadlineMemoryManagementFrame.setTitle("Memory Management")
+        self.deadlineMemoryManagementLayout = QtGui.QVBoxLayout()
+        self.deadlineMemoryManagementFrame.setLayout(self.deadlineMemoryManagementLayout)
+
+        # Memory Management Options
+        self.deadline_enable_memory_management = QtGui.QCheckBox("Enable Memory Management")
+        self.deadline_enable_memory_management.setObjectName("enable_memory_management")
+        self.deadline_enable_memory_management.setToolTip("Enable Memory Management")
+
+        self.deadline_image_cache = LineEditSlider()
+        self.deadline_image_cache.setObjectName("image_cache")
+        self.deadline_image_cache.set_label_text("Image Cache %:")
+        self.deadline_image_cache.set_slider_range(0, 100)
+        self.deadline_image_cache.set_value(100)
+        self.deadline_image_cache.setToolTip("Image Cache")
+        self.deadline_image_cache.setEnabled(False)
+
+        self.deadline_maximum_memory = LineEditSlider()
+        self.deadline_maximum_memory.setObjectName("maximum_memory")
+        self.deadline_maximum_memory.set_label_text("Maximum Memory %:")
+        self.deadline_maximum_memory.set_slider_range(0, 100)
+        self.deadline_maximum_memory.set_value(100)
+        self.deadline_maximum_memory.setToolTip("Maximum Memory")
+        self.deadline_maximum_memory.setEnabled(False)
+
+        # Add the widgets to the memory management frame
+        self.deadlineMemoryManagementLayout.addWidget(self.deadline_enable_memory_management)
+        self.deadlineMemoryManagementLayout.addWidget(self.deadline_image_cache)
+        self.deadlineMemoryManagementLayout.addWidget(self.deadline_maximum_memory)
+
+        # Enable/Disable image cache and maximum memory based on checkbox
+        self.deadline_enable_memory_management.toggled.connect(
+            lambda: self.deadline_image_cache.setEnabled(self.deadline_enable_memory_management.isChecked())
+        )
+        self.deadline_enable_memory_management.toggled.connect(
+            lambda: self.deadline_maximum_memory.setEnabled(self.deadline_enable_memory_management.isChecked())
+        )
+
+        # Add the frames to the main layout
+        self.deadlineOtherOptionsLayout.addWidget(self.deadlineMultiMachineFrame)
+        self.deadlineOtherOptionsLayout.addLayout(self.deadlineOtherOptionsLayout1)
+        self.deadlineOtherOptionsLayout1.addWidget(self.deadlineOutputFileChecking)
+        self.deadlineOtherOptionsLayout1.addWidget(self.deadlineMemoryManagementFrame)
+
+        # Add Progress Bar
+        self.mainLayout.addWidget(self.progressBar)
+
         # Buttons
         self.buttonsLayout = QtGui.QHBoxLayout()
         self.buttonsLayout.setObjectName("buttonsLayout")
+
+        # Submit to Deadline
+        self.submitButton = QtGui.QPushButton(Dialog)
+        self.submitButton.setObjectName("submitButton")
+        self.submitButton.setText("Submit to Deadline")
+        self.submitButton.setMinimumHeight(30)
 
         # Add Selected To Queue
         self.addButton = QtGui.QPushButton(Dialog)
@@ -88,21 +1096,15 @@ class Ui_Dialog(object):
         self.applyButton.setText("Apply")
         self.applyButton.setMinimumHeight(30)
 
-        # Refresh Comp List
-        self.refreshButton = QtGui.QPushButton(Dialog)
-        self.refreshButton.setObjectName("refreshButton")
-        self.refreshButton.setText("Refresh Comp List")
-        self.refreshButton.setMinimumHeight(30)
-
         # Cancel
         self.cancelButton = QtGui.QPushButton(Dialog)
         self.cancelButton.setObjectName("cancelButton")
         self.cancelButton.setText("Cancel")
         self.cancelButton.setMinimumHeight(30)
 
-        self.buttonsLayout.addWidget(self.addButton)
-        self.buttonsLayout.addWidget(self.refreshButton)
         self.buttonsLayout.addWidget(self.applyButton)
+        self.buttonsLayout.addWidget(self.addButton)
+        self.buttonsLayout.addWidget(self.submitButton)
         self.buttonsLayout.addWidget(self.cancelButton)
 
         self.mainLayout.addLayout(self.buttonsLayout)
