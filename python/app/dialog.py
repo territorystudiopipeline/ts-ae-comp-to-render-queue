@@ -67,6 +67,8 @@ class AppDialog(QtGui.QWidget):
 
         self.current_project = self._app.context.project
         self.project_id = self.current_project["id"]
+        self.project_name = self.current_project["name"]
+        self.project_code = None
 
         logger.debug(f"Current Project: {self.current_project}")
         logger.debug(f"Project ID: {self.project_id}")
@@ -87,13 +89,12 @@ class AppDialog(QtGui.QWidget):
         # Deadline variables
         self.deadline_error_message = ""
         self.ae_default_pool = None
+        self.deadline_settings_initialized = False
 
         # lastly, set up our very basic UI
         # self.ui.context.setText("Current Context: %s" % self._app.context)
         self.populate_presets()
-        self.populate_deadline_settings()
-        self.get_sg_fields()
-        self.set_deadline_defaults()
+        self.populate_sg_fields()
         self.connect_signals_and_slots()
 
         # Create render queue items
@@ -102,18 +103,19 @@ class AppDialog(QtGui.QWidget):
         # Set the window size
         self.resize(1000, self.ui.compTableWidget.sizeHint().height())
 
-    def get_sg_fields(self):
+    def populate_sg_fields(self):
         """
             Get the required field info from the project
         """
         # Get the project data
         try:
-            project_data = self._app.shotgun.find_one("Project", [["id", "is", self.project_id]], ["sg_ae_render_pool",])
+            project_data = self._app.shotgun.find_one("Project", [["id", "is", self.project_id]], ["sg_ae_render_pool", 'code'])
         except Exception as e:
             logger.error(f"Error getting project data: {e}")
             project_data = {}
 
         self.ae_default_pool = project_data.get("sg_ae_render_pool", "none")
+        self.project_code = project_data.get("code", None)
 
         if self.ae_default_pool == "none":
             logger.info("Project AE Render Pool Field is not set, defaulting to none")
@@ -307,6 +309,7 @@ class AppDialog(QtGui.QWidget):
         self.ui.addButton.clicked.connect(self.create_render_queue_items)
         self.ui.applyButton.clicked.connect(self.apply_to_render_queue_items)
         self.ui.cancelButton.clicked.connect(self.close)
+        self.ui.deadlinePanel.toggle_button.clicked.connect(self.populate_deadline_settings)
 
         # Connect the deadline settings
         #Machine List
@@ -400,13 +403,16 @@ class AppDialog(QtGui.QWidget):
         """
         # Add Selected Comps to Render Queue
         with self.supress_dialogs():
+            self.toggle_buttons(False)
             self.adobe.app.executeCommand(self.adobe.app.findMenuCommandId("Add to Render Queue"))
             self.create_table_entries()
+            self.toggle_buttons()
 
     def apply_to_render_queue_items(self):
         """
             Apply the changes to the render queue items
         """
+        self.toggle_buttons(False)
         # Get the selected comps
         # Debugging time stamp for testing HH:MM:SS
         self.start_time = time.time()
@@ -433,7 +439,7 @@ class AppDialog(QtGui.QWidget):
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
 
             # Emit progress
-            self.update_progress_bar(int((row + 1) / self.ui.compTableWidget.rowCount() * 100))
+            self.update_progress_bar(int(row / self.ui.compTableWidget.rowCount() * 100))
 
             # Check if the item is checked
             if includeCheckBox.checkState() == QtCore.Qt.Checked:
@@ -575,8 +581,8 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.clearIcon)
                 statusItem.setToolTip("Template Applied | Ready to Render")
 
-        # Hide the progress bar
         self.hide_progress_bar()
+        self.toggle_buttons()
 
         # Debugging time stamp for testing HH:MM:SS
         logger.debug("Finish Time: %s" % time.strftime("%H:%M:%S"))
@@ -778,7 +784,9 @@ class AppDialog(QtGui.QWidget):
 
             :returns: The output location for the render queue item
         """
-        if os.path.basename(render_queue_template).startswith('mov'):
+        template_file_name = os.path.basename(render_queue_template)
+
+        if template_file_name.startswith('mov'):
             templateName = self._app.get_setting("mov_render_template")
         else:
             templateName = self._app.get_setting("seq_render_template")
@@ -798,6 +806,7 @@ class AppDialog(QtGui.QWidget):
 
         fields['name'] = match.group(3)
         fields['version'] = int(match.group(5))
+        fields['ext'] = template_file_name.split("_")[0]
 
         # Add in a %04d number if it's a sequence then strip it out to be [####] for AE
         if 'SEQ' in template.keys:
@@ -880,6 +889,16 @@ class AppDialog(QtGui.QWidget):
             importProjectFolder = self.adobe.app.project.importFile(importOptions)
 
         return importProjectFolder
+
+    def toggle_buttons(self, state=True):
+        """
+            Toggle the buttons to be enabled or disabled
+
+            :param state: The state to set the buttons to
+        """
+        self.ui.applyButton.setEnabled(state)
+        self.ui.addButton.setEnabled(state)
+        self.ui.submitButton.setEnabled(state)
 
     #####################################################################################################
     # Events
@@ -1121,6 +1140,7 @@ class AppDialog(QtGui.QWidget):
                 'missing_footage': self.ui.deadline_continue_on_missing_footage.isChecked(),
                 'job_dependencies': self.ui.deadline_dependencies.get_text(),
                 'on_job_complete': self.ui.deadline_on_job_complete.currentText(),
+                'comment': self.ui.deadline_comment.text(),
             }
         except Exception as e:
             logger.error(f"Failed to get Deadline settings: {e}")
@@ -1131,19 +1151,26 @@ class AppDialog(QtGui.QWidget):
 
     def populate_deadline_settings(self):
         """
-            Populate the Deadline settings in the UI
+            This Method populates the pool and group lists from Deadline and sets the default values.
+            It also sets the default values for the Deadline settings.
         """
-        logger.debug("Populating Deadline settings")
+        if not self.deadline_settings_initialized:
+            logger.debug("Populating Deadline settings")
 
-        # Get the pool and group lists from Deadline
-        pools = self.get_pool_list()
-        groups = self.get_group_list()
+            # Get the pool and group lists from Deadline
+            pools = self.get_pool_list()
+            groups = self.get_group_list()
 
-        # Populate the UI with the pools and groups
-        self.ui.deadline_pool.addItems(pools)
-        self.ui.deadline_secondary_pool.addItems(pools)
-        self.ui.deadline_group.addItems(groups)
-        self.ui.deadline_on_job_complete.addItems(self.deadline_defaults["on_job_complete"])
+            # Populate the UI with the pools and groups
+            self.ui.deadline_pool.addItems(pools)
+            self.ui.deadline_secondary_pool.addItems(pools)
+            self.ui.deadline_group.addItems(groups)
+            self.ui.deadline_on_job_complete.addItems(self.deadline_defaults["on_job_complete"])
+
+            self.deadline_settings_initialized = True
+            logger.debug("Deadline settings populated")
+
+            self.set_deadline_defaults()
 
     # Deadline Command Line Tool
     @staticmethod
@@ -1217,7 +1244,13 @@ class AppDialog(QtGui.QWidget):
         """
             Submit the render queue items to Deadline
         """
+        self.toggle_buttons(False)
+
         logger.info("Submitting to Deadline")
+
+        if not self.deadline_settings_initialized:
+            logger.debug("Lazy loading Deadline settings")
+            self.populate_deadline_settings()
 
         app_version = self.adobe.app.version
 
@@ -1244,14 +1277,25 @@ class AppDialog(QtGui.QWidget):
 
         # If there are rows in the table
         if self.ui.compTableWidget.rowCount() == 0:
-            self.warning_box("No render queue items", "Please add some render queue items to submit to Deadline")
+            self.warning_box("No render queue items available", "Please add some render queue items or refresh the table to submit to Deadline")
             return
 
         logger.debug("Project Checks passed, proceeding with submission")
 
-        # Save and create a copy of the current project
-        self.adobe.app.project.save()
-        logger.info('Project saved')
+        # Open dialog to ask the user if they want to save the project
+        save_project = QtGui.QMessageBox.question(
+            self,
+            "Save Project",
+            "Do you want to save the project before submitting to Deadline?",
+            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
+            QtGui.QMessageBox.Yes,
+        )
+        if save_project == QtGui.QMessageBox.Yes:
+            # Save and create a copy of the current project
+            self.adobe.app.project.save()
+            logger.info('Project saved')
+        else:
+            logger.info('Project not saved')
 
         logger.debug("Creating backup of project")
         backup_location = os.path.join(os.path.dirname(self.adobe.app.project.file.fsName), "deadline_submission_backup")
@@ -1271,7 +1315,8 @@ class AppDialog(QtGui.QWidget):
 
         except Exception as e:
             logger.error("Failed to create backup: %s" % e)
-            traceback.print_exc()
+            error = traceback.format_exc()
+            logger.error("%s" % error)
 
         # Get Deadline Settings
         current_deadline_settings = self.get_deadline_settings()
@@ -1290,7 +1335,7 @@ class AppDialog(QtGui.QWidget):
         for row in range(self.ui.compTableWidget.rowCount()):
 
             # Emit progress
-            self.update_progress_bar(int((row + 1) / self.ui.compTableWidget.rowCount() * 100))
+            self.update_progress_bar(int(row / self.ui.compTableWidget.rowCount() * 100))
 
             render_queue_item = self.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
@@ -1337,7 +1382,8 @@ class AppDialog(QtGui.QWidget):
                                                           deadline_settings=current_deadline_settings,
                                                           project_path=project_path,
                                                           layers=False,
-                                                          previous_job_id=previous_job_id, version=version)
+                                                          previous_job_id=previous_job_id,
+                                                          version=version)
 
                 logger.debug("Render queue item submitted to Deadline: %s" % render_queue_item.comp.name)
 
@@ -1358,6 +1404,7 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setToolTip("Failed to submit to Deadline - %s" % e)
 
         self.hide_progress_bar()
+        self.toggle_buttons()
         logger.info("Finished submitting to Deadline")
 
         # Show all submission results on one message box
@@ -1405,16 +1452,11 @@ class AppDialog(QtGui.QWidget):
         multi_machine = deadline_settings.get('multi_machine', False)
         submit_scene = deadline_settings.get('submit_scene', False)
         comp_name = render_queue_item.comp.name
-        dependent_job_id = previous_job_id if previous_job_id else ""
+        dependent_job_id = previous_job_id or ""
         dependent_comps = False
 
         # Check if the output module is rendering a movie
-        is_movie =  False
-        movie_formats = self.deadline_defaults["movie_formats"]
-        for ext in movie_formats:
-            if output_file_name.endswith(ext):
-                is_movie = True
-                break
+        is_movie = any(output_file_name.endswith(ext) for ext in self.deadline_defaults["movie_formats"])
 
         if override_frame_list or multi_machine:
             # Get the frame duration and start/end times
@@ -1447,7 +1489,7 @@ class AppDialog(QtGui.QWidget):
             if dependent_comps:
                 submit_info.write(f"BatchName={project_name}\n")
             submit_info.write(f"Comment={deadline_settings.get('comment', '')}\n")
-            submit_info.write(f"Department={deadline_settings.get('department', '')}\n")
+            submit_info.write(f"Department={deadline_settings.get('department', self.project_name or '')}\n")
             submit_info.write(f"Group={deadline_settings.get('group', 'ae')}\n")
             submit_info.write(f"Pool={deadline_settings.get('pool', 'none')}\n")
             submit_info.write(f"SecondaryPool={deadline_settings.get('secondary_pool', 'none')}\n")
@@ -1458,6 +1500,7 @@ class AppDialog(QtGui.QWidget):
             submit_info.write(f"LimitConcurrentTasksToNumberOfCpus={deadline_settings.get('limit_concurrent_tasks_to_number_cpus', '0')}\n")
             submit_info.write(f"JobDependencies={current_job_dependencies}\n")
             submit_info.write(f"OnJobComplete={deadline_settings.get('on_job_complete', 'Nothing')}\n")
+            submit_info.write(f"FailureDetectionTaskErrors={deadline_settings.get('failure_detection_task_errors', 5)}\n")
 
             # Blacklist
             if deadline_settings.get('submit_allow_list_as_deny_list', False):

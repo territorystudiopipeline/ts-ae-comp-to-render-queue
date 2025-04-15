@@ -43,6 +43,10 @@ class CollapsiblePanel(QtGui.QWidget):
         self.main_layout.addWidget(self.toggle_button)
         self.main_layout.addWidget(self.content_frame)
 
+        # Collapse the panel by default
+        self.content_frame.setVisible(False)
+        self.toggle_button.setText(f"▶ {title}")
+
     def toggle_panel(self):
         is_visible = self.content_frame.isVisible()
         self.content_frame.setVisible(not is_visible)
@@ -266,6 +270,7 @@ class ItemSelectionDialog(QtGui.QDialog):
         # Machine List
         self.available_list_label = QtGui.QLabel("Available Items", self)
         self.available_list = QtGui.QListWidget(self)
+        self.available_list.setSelectionMode(QtGui.QAbstractItemView.MultiSelection)
 
         self.available_list_layout.addWidget(self.available_list_label)
         self.available_list_layout.addWidget(self.available_list)
@@ -283,18 +288,22 @@ class ItemSelectionDialog(QtGui.QDialog):
         self.add_button = QtGui.QPushButton(">", self)
         self.add_button.setToolTip("Add selected items to the selected list")
         self.add_button.setMaximumHeight(30)
+        self.add_button.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Right))
 
         self.remove_button = QtGui.QPushButton("<", self)
         self.remove_button.setToolTip("Remove selected items from the selected list")
         self.remove_button.setMaximumHeight(30)
+        self.remove_button.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Left))
 
         self.move_up_button = QtGui.QPushButton("^", self)
-        self.move_up_button.setToolTip("Move selected machine up")
+        self.move_up_button.setToolTip("Move selected item up")
         self.move_up_button.setMaximumHeight(30)
+        self.move_up_button.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Up))
 
         self.move_down_button = QtGui.QPushButton("v", self)
-        self.move_down_button.setToolTip("Move selected machine down")
+        self.move_down_button.setToolTip("Move selected item down")
         self.move_down_button.setMaximumHeight(30)
+        self.move_down_button.setShortcut(QtGui.QKeySequence(QtCore.Qt.Key_Down))
 
         # Add buttons to the button layout
         self.button_layout.addStretch()
@@ -755,6 +764,12 @@ class Ui_Dialog(object):
         # DISABLING THE DEPENDENCIES LINE EDIT WE ARE NOT SUPPORTING THIS
         self.deadline_dependencies.setEnabled(False)
 
+        # Comment
+        self.deadline_comment = QtGui.QLineEdit()
+        self.deadline_comment.setObjectName("comment")
+        self.deadline_comment.setToolTip("Comment")
+        self.deadline_comment.setValidator(QtGui.QRegExpValidator(QtCore.QRegExp("[^<>*|\"?\\/:]+"), self.deadline_comment))
+
         # Machine List
         self.deadline_machine_list = LineEditButton()
         self.deadline_machine_list.setObjectName("machine_list")
@@ -811,6 +826,7 @@ class Ui_Dialog(object):
         # Add the widgets to column3
         self.deadlineBaseSettingsFormLayout3.addRow("Machine List:", self.deadline_machine_list)
         self.deadlineBaseSettingsFormLayout3.addRow("On Job Complete:", self.deadline_on_job_complete)
+        self.deadlineBaseSettingsFormLayout3.addRow("Comment:", self.deadline_comment)
         self.deadlineBaseSettingsFormLayout3.addRow("", self.deadline_submit_as_suspended)
         self.deadlineBaseSettingsFormLayout3.addRow("", self.deadline_machine_list_deny)
 
