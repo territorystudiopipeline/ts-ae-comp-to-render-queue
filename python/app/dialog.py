@@ -581,7 +581,11 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.clearIcon)
                 statusItem.setToolTip("Template Applied | Ready to Render")
 
+        # Show progress at 100%
+        self.update_progress_bar(100)
+        time.sleep(0.2)
         self.hide_progress_bar()
+
         self.toggle_buttons()
 
         # Debugging time stamp for testing HH:MM:SS
@@ -1240,7 +1244,7 @@ class AppDialog(QtGui.QWidget):
     ####################################
     # Deadline Submission
     ####################################
-    def submit_to_deadline(self):
+    def submit_to_deadline(self, save_project=True):
         """
             Submit the render queue items to Deadline
         """
@@ -1282,14 +1286,6 @@ class AppDialog(QtGui.QWidget):
 
         logger.debug("Project Checks passed, proceeding with submission")
 
-        # Open dialog to ask the user if they want to save the project
-        save_project = QtGui.QMessageBox.question(
-            self,
-            "Save Project",
-            "Do you want to save the project before submitting to Deadline?",
-            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
-            QtGui.QMessageBox.Yes,
-        )
         if save_project == QtGui.QMessageBox.Yes:
             # Save and create a copy of the current project
             self.adobe.app.project.save()
@@ -1403,7 +1399,11 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.errorIcon)
                 statusItem.setToolTip("Failed to submit to Deadline - %s" % e)
 
+        # Show progress at 100%
+        self.update_progress_bar(100)
+        time.sleep(0.2)
         self.hide_progress_bar()
+
         self.toggle_buttons()
         logger.info("Finished submitting to Deadline")
 
@@ -1500,7 +1500,8 @@ class AppDialog(QtGui.QWidget):
             submit_info.write(f"LimitConcurrentTasksToNumberOfCpus={deadline_settings.get('limit_concurrent_tasks_to_number_cpus', '0')}\n")
             submit_info.write(f"JobDependencies={current_job_dependencies}\n")
             submit_info.write(f"OnJobComplete={deadline_settings.get('on_job_complete', 'Nothing')}\n")
-            submit_info.write(f"FailureDetectionTaskErrors={deadline_settings.get('failure_detection_task_errors', 5)}\n")
+            submit_info.write(f"FailureDetectionTaskErrors={deadline_settings.get('failure_detection_task_errors', 8)}\n")
+            submit_info.write(f"FailureDetectionJobErrors={deadline_settings.get('failure_detection_job_errors', 20)}\n")
 
             # Blacklist
             if deadline_settings.get('submit_allow_list_as_deny_list', False):
@@ -1599,9 +1600,18 @@ class AppDialog(QtGui.QWidget):
         """
             Apply the settings and submit to Deadline
         """
+        # Open dialog to ask the user if they want to save the project
+        save_project = QtGui.QMessageBox.question(
+            self,
+            "Save Project",
+            "Do you want to save the project before submitting to Deadline?",
+            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
+            QtGui.QMessageBox.Yes,
+        )
+
         logger.debug("Applying settings and submitting to Deadline")
         self.apply_to_render_queue_items()
-        self.submit_to_deadline()
+        self.submit_to_deadline(save_project=save_project)
 
     ####################################
     # Deadline Lists

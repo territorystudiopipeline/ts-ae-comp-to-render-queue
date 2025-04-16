@@ -432,10 +432,16 @@ class ItemSelectionDialog(QtGui.QDialog):
             Populate the available and selected lists from a widget.
         """
         logger.debug("Populating item lists from widget")
-        if isinstance(self.widget, (LineEditButton, QtGui.QLineEdit)):
-            item_list = self.string_to_item_list(
-                self.widget.get_text() if isinstance(self.widget, LineEditButton) else self.widget.text())
-            self.populate_selected_list(item_list)
+
+        if isinstance(self.widget, LineEditButton):
+            text = self.widget.get_text()
+        elif isinstance(self.widget, QtGui.QLineEdit):
+            text = self.widget.text()
+        else:
+            text = ""
+
+        item_list = self.string_to_item_list(text)
+        self.populate_selected_list(item_list)
 
     def accept(self):
         """
