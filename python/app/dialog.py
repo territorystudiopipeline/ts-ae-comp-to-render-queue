@@ -290,13 +290,29 @@ class AppDialog(QtGui.QWidget):
 
     def populate_presets(self, widget=None):
         """
-            Populate the render format dropdown with the available presets
+            Populate the render format dropdown with the available
+            render presets from the app settings.
+
+            :param widget: The widget to populate with the presets, if None,
         """
         self.presets = {}
         for preset_item in self._app.get_setting("render_presets"):
-            # use an internal method to resolve the path of the ae template files
-            resolved_path = self._app._TankBundle__resolve_hook_expression(preset_item['name'], preset_item['path'])
-            self.presets[preset_item['name']] = resolved_path[0]
+            # Check if path is a valid path
+            resolved_path = (preset_item['name'], preset_item['path'])
+
+            # Check if the path contains a hook expression that needs to be resolved
+            if re.search(r'\{.*?\}', preset_item['path']):
+                logger.debug("Preset path must be resolved: %s" % preset_item['path'])
+                # use an internal method to resolve the path of the ae template files
+                resolved_path = self._app._TankBundle__resolve_hook_expression(preset_item['name'], preset_item['path'])
+
+                self.presets[preset_item['name']] = resolved_path[0]
+            else:
+                # When there are no tokens to resolve, just use the path as is
+                # it should be a valid file path when it's a custom preset
+                self.presets[preset_item['name']] = preset_item['path']
+                logger.debug("Preset path %s already exists" % preset_item['path'])
+
             if widget:
                 widget.insertItems(-1, [preset_item['name']])
 
@@ -454,6 +470,7 @@ class AppDialog(QtGui.QWidget):
                 if frame_range[0] is None or frame_range[1] is None:
                     logger.debug("Bad frame range, skipping %s" % comp.name)
                     self.alert_box("Bad frame range", "Please check the frame range for %s, Skipping" % comp.name)
+
                     # Update the status icon
                     statusItem.setIcon(self.ui.errorIcon)
                     statusItem.setToolTip("Template Not Applied | Error - Bad Frame Range")
@@ -463,7 +480,11 @@ class AppDialog(QtGui.QWidget):
                 # Check the template actually exists
                 if not self.check_template_exists(comp, frame_range, render_queue_template, templateName):
                     self.alert_box("Error", "Something went wrong applying or locating an output template")
+
+                    # Leave these debug messages for troubleshooting
                     logger.debug("Error applying template %s" % templateName)
+                    logger.debug(render_queue_template)
+
                     # Update the status icon
                     statusItem.setIcon(self.ui.errorIcon)
                     statusItem.setToolTip("Template Not Applied | Error - Template Not Found")
