@@ -85,6 +85,7 @@ class AppDialog(QtGui.QWidget):
         self.first_frame = self._app.get_setting('default_first_frame')
         self.last_frame = self._app.get_setting('default_last_frame')
         self.deadline_defaults = self._app.get_setting('deadline_defaults')
+        self.render_preset_movie_formats = self._app.get_setting('render_preset_movie_formats')
 
         # Deadline variables
         self.deadline_error_message = ""
@@ -811,7 +812,9 @@ class AppDialog(QtGui.QWidget):
         """
         template_file_name = os.path.basename(render_queue_template)
 
-        if template_file_name.startswith('mov'):
+        # Check if the template is a movie format or treat it as a sequence
+        # TODO: Should update the mov_render_template name to be more generic in the future
+        if any(template_file_name.startswith(fmt) for fmt in self.render_preset_movie_formats):
             templateName = self._app.get_setting("mov_render_template")
         else:
             templateName = self._app.get_setting("seq_render_template")
