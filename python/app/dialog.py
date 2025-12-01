@@ -1488,7 +1488,7 @@ class AppDialog(QtGui.QWidget):
             frame_offset = self.adobe.app.project.displayStartFrame
             display_start_time = render_queue_item.comp.displayStartTime
 
-            if display_start_time:
+            if display_start_time is not None:
                 start_frame = frame_offset + round(display_start_time / frame_duration) + round(render_queue_item.timeSpanStart / frame_duration)
                 end_frame = start_frame + round(render_queue_item.timeSpanDuration / frame_duration) - 1
                 frame_list = f"{start_frame}-{end_frame}"
