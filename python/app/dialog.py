@@ -1336,7 +1336,9 @@ class AppDialog(QtGui.QWidget):
         except Exception as e:
             logger.error("Failed to create backup: %s" % e)
             error = traceback.format_exc()
+
             logger.error("%s" % error)
+            backup_file = self.adobe.app.project.file.fsName  # Fallback to original file if backup fails for deadline submission
 
         # Get Deadline Settings
         current_deadline_settings = self.get_deadline_settings()
@@ -1403,7 +1405,8 @@ class AppDialog(QtGui.QWidget):
                                                           project_path=project_path,
                                                           layers=False,
                                                           previous_job_id=previous_job_id,
-                                                          version=version)
+                                                          version=version,
+                                                          render_file=backup_file)
 
                 logger.debug("Render queue item submitted to Deadline: %s" % render_queue_item.comp.name)
 
@@ -1437,7 +1440,7 @@ class AppDialog(QtGui.QWidget):
         else:
             self.message_box("Deadline Submission", "Submission completed successfully.\n\n%d jobs submitted to Deadline." % num_successful_submissions)
 
-    def submit_render_queue_item_to_deadline(self, render_queue_item, deadline_settings, project_path, layers, previous_job_id, version):
+    def submit_render_queue_item_to_deadline(self, render_queue_item, deadline_settings, project_path, layers, previous_job_id, version, render_file):
         """
             Submit the render queue item to Deadline
 
@@ -1451,6 +1454,7 @@ class AppDialog(QtGui.QWidget):
             :param layers: Whether to submit layers or not
             :param previous_job_id: The previous job ID to use for the submission
             :param version: The version of After Effects
+            :param render_file: The path to the render file
         """
         logger.debug("Submitting render queue item to Deadline: %s" % render_queue_item.comp.name)
 
@@ -1466,8 +1470,8 @@ class AppDialog(QtGui.QWidget):
         plugin_info_path = os.path.join(temp_folder, "ae_plugin_info.job")
 
         # Submission variables
-        project_name = os.path.basename(self.adobe.app.project.file.name)
-        job_name = f"{project_name} - {render_queue_item.comp.name}"
+        ae_project_name = os.path.basename(self.adobe.app.project.file.name)
+        job_name = f"{self.project_name} - {ae_project_name} - {render_queue_item.comp.name}"
         start_frame = ""
         end_frame = ""
         frame_list = deadline_settings.get('frame_list', "")
@@ -1511,7 +1515,7 @@ class AppDialog(QtGui.QWidget):
             submit_info.write(f"Plugin=AfterEffects\n")
             submit_info.write(f"Name={job_name}\n")
             if dependent_comps:
-                submit_info.write(f"BatchName={project_name}\n")
+                submit_info.write(f"BatchName={self.project_name} - {ae_project_name}\n")
             submit_info.write(f"Comment={deadline_settings.get('comment', '')}\n")
             submit_info.write(f"Department={deadline_settings.get('department', self.project_name or '')}\n")
             submit_info.write(f"Group={deadline_settings.get('group', 'ae')}\n")
@@ -1569,7 +1573,8 @@ class AppDialog(QtGui.QWidget):
         # Create plugin info file
         with open(plugin_info_path, "w") as plugin_info:
 
-            plugin_info.write(f"SceneFile={project_path}\n")
+            #plugin_info.write(f"SceneFile={project_path}\n"
+            plugin_info.write(f"SceneFile={render_file}\n")
             plugin_info.write(f"Comp={comp_name}\n")
 
             if deadline_settings.get('include_output_path', False):
@@ -1628,7 +1633,7 @@ class AppDialog(QtGui.QWidget):
         save_project = QtGui.QMessageBox.question(
             self,
             "Save Project",
-            "Do you want to save the project before submitting to Deadline?",
+            "Do you want to save the project before submitting to Deadline? \n\nIt's recommended to save the project to ensure whats being submitted is up to date.",
             QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
             QtGui.QMessageBox.Yes,
         )
