@@ -7,12 +7,10 @@
 # By accessing, using, copying or modifying this work you indicate your
 # agreement to the Shotgun Pipeline Toolkit Source Code License. All rights
 # not expressly granted therein are reserved by Shotgun Software Inc.
-import datetime
 import shutil
 import subprocess
 import sgtk
 import os
-import sys
 import re
 import time
 from contextlib import contextmanager
@@ -429,6 +427,12 @@ class AppDialog(QtGui.QWidget):
     def apply_to_render_queue_items(self):
         """
             Apply the changes to the render queue items
+
+            Arguments:
+                None
+
+            Returns:
+                None
         """
         self.toggle_buttons(False)
         # Get the selected comps
@@ -450,7 +454,6 @@ class AppDialog(QtGui.QWidget):
         for row in range(self.ui.compTableWidget.rowCount()):
             tableItem = self.ui.compTableWidget.item(row, 0)
             statusItem = self.ui.compTableWidget.item(row, 1)
-            frameRangeLineEdit = self.ui.compTableWidget.cellWidget(row, 2)
             frameRangeComboBox = self.ui.compTableWidget.cellWidget(row, 3)
             renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
             useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
@@ -540,6 +543,7 @@ class AppDialog(QtGui.QWidget):
                 else:
                     use_comp_name = False
                 logger.debug("Use Comp Name: %s" % use_comp_name)
+
                 # Grab the output folder from templates
                 outputLocation = self.get_shotgrid_template(render_queue_template, use_comp_name, compName)
 
@@ -593,7 +597,11 @@ class AppDialog(QtGui.QWidget):
             Updates the status of the render queue items in the table and creates a copy
             of the project file for each render queue item to be rendered into the templated location.
 
-            :returns: True if successful, False otherwise
+            Arguments:
+                None
+
+            Returns:
+                True if successful, False otherwise
         """
 
         self.toggle_buttons(False)
@@ -644,7 +652,6 @@ class AppDialog(QtGui.QWidget):
                 render_queue_item = tableItem.data(QtCore.Qt.UserRole)
                 comp = render_queue_item.comp
                 compName = comp.name
-                templateName = renderFormatDropdown.currentText()
                 render_queue_template = self.get_render_queue_template(row)
                 frame_range = self.get_frame_range(comp, row)
 
@@ -656,7 +663,10 @@ class AppDialog(QtGui.QWidget):
                 logger.debug("Use Comp Name: %s" % use_comp_name)
 
                 # Grab the output folder from templates
-                render_scene_file_path = self.get_shotgrid_template(render_queue_template, use_comp_name, compName, True)
+                render_scene_file_path = self.get_shotgrid_template(render_queue_template,
+                                                                    use_comp_name,
+                                                                    compName,
+                                                                    True)
 
                 # Create the output folder if it doesn't already exist
                 render_scene_file_directory = os.path.dirname(render_scene_file_path)
@@ -668,7 +678,7 @@ class AppDialog(QtGui.QWidget):
                 logger.debug("Render Scene File Directory: %s" % render_scene_file_directory)
                 logger.debug("Comp Name: %s" % comp.name)
 
-                # Copy the current project file to the render scene file path
+                # Creates a copy of the project file for the render scene
                 try:
                     logger.debug("Copying project file to render scene location: %s" % render_scene_file_path)
                     shutil.copy(self.adobe.app.project.file.fsName, render_scene_file_path)
@@ -699,7 +709,7 @@ class AppDialog(QtGui.QWidget):
             else:
                 # Change the render queue item status to UNQUEUED if unchecked
                 render_queue_item = tableItem.data(QtCore.Qt.UserRole)
-                render_queue_item.status = self.adobe.RQItemStatus.UNQUEUED
+                render_queue_item.render = False # Set to unqueued
                 logger.debug("Render Queue Item for: %s has been set to UNQUEUED" % render_queue_item.comp.name)
 
                 # Update the status icon
@@ -880,6 +890,9 @@ class AppDialog(QtGui.QWidget):
         """
             Runs basic project checks
 
+            Arguments:
+                None
+
             :returns: True if the project checks pass, False otherwise
         """
         logger.debug("Running project checks")
@@ -956,12 +969,14 @@ class AppDialog(QtGui.QWidget):
         """
             Get the output location from the render queue template
 
-            :param render_queue_template: The template to use for the render queue item
-            :param use_comp_name: Whether to use the comp name as the output file name
-            :param comp_name: The name of the comp to use if use_comp_name is True
-            :param render_scene: Whether to get the render scene template
+            Arguments:
+                render_queue_template: The render queue template to use
+                use_comp_name: Whether to use the comp name in the output location
+                comp_name: The name of the comp to use in the output location
+                render_scene: Whether to get the render scene file path instead of the output location
 
-            :returns: The output location for the render queue item or render scene file path
+            Returns:
+                The output location for the render queue item or render scene file path
         """
         template_file_name = os.path.basename(render_queue_template)
 
@@ -1017,6 +1032,14 @@ class AppDialog(QtGui.QWidget):
     def check_template_exists(self, comp, frame_range, render_queue_template, templateName):
         """
             Check that the template exists, if not create it
+
+            Arguments:
+                comp: The comp to use for creating the template if it doesn't exist
+                frame_range: The frame range to use for creating the template if it doesn't exist
+                render_queue_template: The template to use for the render queue item
+                templateName: The name of the template to check for
+
+            Returns: True if the template exists or was created, False otherwise
         """
         # Add the comp to the render queue
         renderQueueItem = self.adobe.app.project.renderQueue.items.add(comp)
@@ -1047,7 +1070,8 @@ class AppDialog(QtGui.QWidget):
         """
             Find a render queue item by the comp name
 
-            :param comp_name: The name of the comp to search for
+            Arguments:
+                comp_name: The name of the comp to find
 
             :returns: The render queue item
         """
@@ -1189,7 +1213,9 @@ class AppDialog(QtGui.QWidget):
 
     def match_selected_to_current_row(self):
         """
-            Match the selected rows to the row
+            Match the selected rows to the row under the mouse cursor
+
+            :returns: None
         """
 
         current_row = self.get_row_from_cursor()
@@ -1246,6 +1272,10 @@ class AppDialog(QtGui.QWidget):
     def supress_dialogs(self):
         """
             Suppress dialogs
+
+            Usage:
+                with self.supress_dialogs():
+                    # Code that may trigger dialogs
         """
 
         try:
@@ -1264,7 +1294,8 @@ class AppDialog(QtGui.QWidget):
         """
             Show the progress bar
 
-            :param format_text: The text to display in the progress bar
+            Arguments:
+                format_text: The text to display on the progress bar
         """
         self.ui.progressBar.setVisible(True)
         self.ui.progressBar.setValue(0)
@@ -1282,7 +1313,8 @@ class AppDialog(QtGui.QWidget):
     def update_progress_bar(self, value):
         """
             Update the progress bar
-            :param value: The value to set the progress bar to
+            Arguments:
+                value: The value to set the progress bar to
         """
         self.ui.progressBar.setValue(value)
 
@@ -1294,7 +1326,8 @@ class AppDialog(QtGui.QWidget):
         """
             Get the current Deadline settings from the UI
 
-            :returns: A dictionary containing the Deadline settings
+            Returns:
+                dict: A dictionary containing the current Deadline settings
         """
         try:
             self.deadline_settings = {
@@ -1623,13 +1656,17 @@ class AppDialog(QtGui.QWidget):
             Iv removed some of the checks and statements that were inplace for older after effects versions
             I have also kept the code and structure as close to the original submitter as possible for now
 
-            :param render_queue_item: The render queue item to submit
-            :param deadline_settings: The Deadline settings to use for the submission
-            :param project_path: The path to the project file
-            :param layers: Whether to submit layers or not
-            :param previous_job_id: The previous job ID to use for the submission
-            :param version: The version of After Effects
-            :param render_file: The path to the render file
+            Arguments:
+                render_queue_item: The render queue item to submit
+                deadline_settings: The deadline settings to use for submission
+                project_path: The path to the project file
+                layers: Whether to submit layers (not supported yet)
+                previous_job_id: The job ID of the previous job (for dependencies)
+                version: The version of After Effects
+                render_file: The path to the render scene file
+
+            Returns:
+                None
         """
         logger.debug("Submitting render queue item to Deadline: %s" % render_queue_item.comp.name)
 
@@ -1826,7 +1863,7 @@ class AppDialog(QtGui.QWidget):
     def get_machine_list(self):
         """
             Get the machine list from Deadline
-            :returns: A list of machines
+            Returns: A list of machines
         """
         logger.debug("Getting machine list from Deadline")
         result = self.call_deadline_command(["-GetSlaveNames"])
@@ -1840,7 +1877,7 @@ class AppDialog(QtGui.QWidget):
     def get_pool_list(self):
         """
             Get the pool list from Deadline
-            :returns: A list of pools
+            Returns: A list of pools
         """
         logger.debug("Getting pool list from Deadline")
         result = self.call_deadline_command(["-Pools"])
@@ -1853,7 +1890,7 @@ class AppDialog(QtGui.QWidget):
     def get_group_list(self):
         """
             Get the group list from Deadline
-            :returns: A list of groups
+            Returns: A list of groups
         """
         logger.debug("Getting group list from Deadline")
         result = self.call_deadline_command(["-Groups"])
