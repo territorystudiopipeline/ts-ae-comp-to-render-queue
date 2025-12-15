@@ -1105,6 +1105,7 @@ class Ui_Dialog(object):
         self.submitButton.setObjectName("submitButton")
         self.submitButton.setText("Submit to Deadline")
         self.submitButton.setMinimumHeight(30)
+        self.submitButton.setStyleSheet("background-color: SteelBlue; color: white;")
 
         # Add Selected To Queue
         self.addButton = QtGui.QPushButton(Dialog)
@@ -1118,6 +1119,12 @@ class Ui_Dialog(object):
         self.applyButton.setText("Apply")
         self.applyButton.setMinimumHeight(30)
 
+        # Render Queue
+        self.renderButton = QtGui.QPushButton(Dialog)
+        self.renderButton.setObjectName("renderButton")
+        self.renderButton.setText("Render")
+        self.renderButton.setMinimumHeight(30)
+
         # Cancel
         self.cancelButton = QtGui.QPushButton(Dialog)
         self.cancelButton.setObjectName("cancelButton")
@@ -1126,10 +1133,11 @@ class Ui_Dialog(object):
 
         self.buttonsLayout.addWidget(self.applyButton)
         self.buttonsLayout.addWidget(self.addButton)
-        self.buttonsLayout.addWidget(self.submitButton)
         self.buttonsLayout.addWidget(self.cancelButton)
 
         self.mainLayout.addLayout(self.buttonsLayout)
+        self.mainLayout.addWidget(self.renderButton)
+        self.mainLayout.addWidget(self.submitButton)
         self.horizontalLayout.addLayout(self.mainLayout)
 
         self.retranslateUi(Dialog)

@@ -323,6 +323,7 @@ class AppDialog(QtGui.QWidget):
         """
         # Connect the buttons
         self.ui.submitButton.clicked.connect(self.apply_and_submit)
+        self.ui.renderButton.clicked.connect(self.render_current_queue_items)
         self.ui.addButton.clicked.connect(self.create_render_queue_items)
         self.ui.applyButton.clicked.connect(self.apply_to_render_queue_items)
         self.ui.cancelButton.clicked.connect(self.close)
@@ -534,8 +535,13 @@ class AppDialog(QtGui.QWidget):
                     render_queue_item.timeSpanDuration = comp.frameDuration * 1
                     logger.debug("Setting time span to single frame")
 
+                if useCompNameCheckBox.checkState() == QtCore.Qt.Checked:
+                    use_comp_name = True
+                else:
+                    use_comp_name = False
+                logger.debug("Use Comp Name: %s" % use_comp_name)
                 # Grab the output folder from templates
-                outputLocation = self.get_shotgrid_template(render_queue_template)
+                outputLocation = self.get_shotgrid_template(render_queue_template, use_comp_name, compName)
 
                 # Create the output folder if it doesn't already exist
                 folderPath = os.path.dirname(outputLocation)
@@ -546,40 +552,6 @@ class AppDialog(QtGui.QWidget):
                 logger.debug("Output location: %s" % outputLocation)
                 logger.debug("Output folder: %s" % folderPath)
                 logger.debug("Comp Name: %s" % comp.name)
-
-                # Replace output location with comp name if checkbox is checked
-                if useCompNameCheckBox.checkState() == QtCore.Qt.Checked:
-                    # Get the original output file and strip the folder path
-                    originalOutputFile = outputLocation.replace(folderPath, '')
-
-                    # Get the filename
-                    fileName = self.adobe.app.project.file.name
-
-                    # EntityName _ Name _v VersionNumber FileExtension
-                    match = re.match(r'(.*)(_)(.*)(_v)(\d\d\d)(.*)', fileName)
-
-                    name = match.group(3)
-                    version = int(match.group(5))
-                    compName = comp.name
-
-                    # Join the comp name with the version number
-                    newFileName = "%s_v%03d" % (compName, version)
-
-                    # Replace the first group before the first . with the comp name
-                    newOutputFile = re.sub(r'([^.]+)', newFileName, originalOutputFile, 1)
-
-                    # Debugging
-                    logger.debug("Original Output File: %s" % originalOutputFile)
-                    logger.debug("New Output File: %s" % newOutputFile)
-
-                    # Rebuild the output location
-                    outputLocation = os.path.join(folderPath, compName, newOutputFile)
-                    logger.debug("Output location: %s" % outputLocation)
-
-                    # Create the output folder if it doesn't already exist
-                    folderPath = os.path.dirname(outputLocation)
-                    if not os.path.exists(folderPath):
-                        os.makedirs(folderPath)
 
                 # If Single Frame is selected, Remove the frame range from the output location
                 if frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
@@ -614,6 +586,136 @@ class AppDialog(QtGui.QWidget):
         logger.debug("Finish Time: %s" % time.strftime("%H:%M:%S"))
         logger.debug("Total Time: %s" % (time.time() - self.start_time))
         logger.debug("Total Render Queue Items Updated: %s" % count)
+
+    def process_queue_items_for_render(self):
+        """
+            Process the render queue items for rendering locally
+            Updates the status of the render queue items in the table and creates a copy
+            of the project file for each render queue item to be rendered into the templated location.
+
+            :returns: True if successful, False otherwise
+        """
+
+        self.toggle_buttons(False)
+
+        project_check = self.run_project_checks()
+        if not project_check:
+            return False
+
+        # If there are rows in the table
+        if self.ui.compTableWidget.rowCount() == 0:
+            self.warning_box("No render queue items available",
+                             "Please add some render queue items or refresh the table to Render the current items")
+            return False
+
+        logger.debug("All Checks passed, proceeding with Render")
+
+        save_project = QtGui.QMessageBox.question(
+            self,
+            "Save Project",
+            "Saving is required before rendering. Do you want to save the current project?",
+            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
+            QtGui.QMessageBox.Yes,
+        )
+
+        if save_project == QtGui.QMessageBox.Yes:
+            self.adobe.app.project.save()
+            logger.info('Project saved')
+        else:
+            return False
+
+        # Show the progress bar
+        self.show_progress_bar(format_text="Updating render queue items status's...")
+
+        # Get the render queue items from the table
+        count = 0
+        for row in range(self.ui.compTableWidget.rowCount()):
+            tableItem = self.ui.compTableWidget.item(row, 0)
+            statusItem = self.ui.compTableWidget.item(row, 1)
+            renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
+            useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
+            includeCheckBox = self.ui.compTableWidget.item(row, 6)
+
+            # Emit progress
+            self.update_progress_bar(int(row / self.ui.compTableWidget.rowCount() * 100))
+
+            # Check if the item is checked
+            if includeCheckBox.checkState() == QtCore.Qt.Checked:
+                render_queue_item = tableItem.data(QtCore.Qt.UserRole)
+                comp = render_queue_item.comp
+                compName = comp.name
+                templateName = renderFormatDropdown.currentText()
+                render_queue_template = self.get_render_queue_template(row)
+                frame_range = self.get_frame_range(comp, row)
+
+                if useCompNameCheckBox.checkState() == QtCore.Qt.Checked:
+                    use_comp_name = True
+                else:
+                    use_comp_name = False
+
+                logger.debug("Use Comp Name: %s" % use_comp_name)
+
+                # Grab the output folder from templates
+                render_scene_file_path = self.get_shotgrid_template(render_queue_template, use_comp_name, compName, True)
+
+                # Create the output folder if it doesn't already exist
+                render_scene_file_directory = os.path.dirname(render_scene_file_path)
+                if not os.path.exists(render_scene_file_directory):
+                    os.makedirs(render_scene_file_directory)
+
+                # Debugging
+                logger.debug("Render Scene File: %s" % render_scene_file_path)
+                logger.debug("Render Scene File Directory: %s" % render_scene_file_directory)
+                logger.debug("Comp Name: %s" % comp.name)
+
+                # Copy the current project file to the render scene file path
+                try:
+                    logger.debug("Copying project file to render scene location: %s" % render_scene_file_path)
+                    shutil.copy(self.adobe.app.project.file.fsName, render_scene_file_path)
+                    logger.info('Copy created: %s' % render_scene_file_path)
+
+                except Exception as e:
+                    logger.error("Failed to create render scene backup: %s" % e)
+                    error = traceback.format_exc()
+                    logger.error("%s" % error)
+
+                    self.alert_box("Error", "Failed to create render scene backup:\n\n%s" % e)
+
+                    # Update the status icon
+                    statusItem.setIcon(self.ui.errorIcon)
+                    statusItem.setToolTip("Local Render | Error - Failed to create render scene backup")
+                    includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                    continue
+
+                # Log
+                logger.debug("Render Queue Item for: %s has been processed" % render_queue_item.comp.name)
+                count += 1
+
+                # Update the status icon
+                statusItem = self.ui.compTableWidget.item(row, 1)
+                statusItem.setIcon(self.ui.clearIcon)
+                statusItem.setToolTip("Local Render | Ready to Render - Render Scene Created")
+
+            else:
+                # Change the render queue item status to UNQUEUED if unchecked
+                render_queue_item = tableItem.data(QtCore.Qt.UserRole)
+                render_queue_item.status = self.adobe.RQItemStatus.UNQUEUED
+                logger.debug("Render Queue Item for: %s has been set to UNQUEUED" % render_queue_item.comp.name)
+
+                # Update the status icon
+                statusItem = self.ui.compTableWidget.item(row, 1)
+                statusItem.setIcon(self.ui.warningIcon)
+                statusItem.setToolTip("UNQUEUED - Not Included in Render Queue")
+
+        # Show progress at 100%
+        self.update_progress_bar(100)
+        time.sleep(0.2)
+        self.hide_progress_bar()
+
+        self.toggle_buttons()
+        logger.debug("Total Render Queue Items Processed: %s" % count)
+
+        return True
 
     def get_frame_range(self, comp, row):
         """
@@ -753,6 +855,54 @@ class AppDialog(QtGui.QWidget):
 
         return render_queue_template
 
+    def render_current_queue_items(self):
+        """
+            Process and render the current render queue items
+
+            returns: None
+        """
+        ready_to_render = self.process_queue_items_for_render()
+
+        if not ready_to_render:
+            self.toggle_buttons()
+            return
+
+        # Bring Render Queue to front
+        self.adobe.app.project.renderQueue.showWindow(True)
+
+        # Render the current render queue items
+        logger.debug("Starting render of current render queue items")
+        self.adobe.app.project.renderQueue.renderAsync()
+
+        self.close()
+
+    def run_project_checks(self):
+        """
+            Runs basic project checks
+
+            :returns: True if the project checks pass, False otherwise
+        """
+        logger.debug("Running project checks")
+
+        # If there is an active project
+        if not self.adobe.app.project:
+            self.warning_box("No project open", "Please open a project before rendering")
+            return False
+
+        # If the project is not saved
+        if not self.adobe.app.project.file:
+            self.warning_box("Project not saved", "Please save the project before rendering")
+            return False
+
+        # If there are no render queue items
+        if self.adobe.app.project.renderQueue.numItems == 0:
+            self.warning_box("No render queue items", "Please add some render queue items to render")
+            return False
+
+        logger.debug("Project Checks passed, proceeding")
+
+        return True
+
     def alert_box(self, title, text):
         """
             Display an alert box
@@ -802,22 +952,38 @@ class AppDialog(QtGui.QWidget):
             defaultButton=QtGui.QMessageBox.Ok,
         )
 
-    def get_shotgrid_template(self, render_queue_template):
+    def get_shotgrid_template(self, render_queue_template, use_comp_name=False, comp_name=None, render_scene=False):
         """
             Get the output location from the render queue template
 
             :param render_queue_template: The template to use for the render queue item
+            :param use_comp_name: Whether to use the comp name as the output file name
+            :param comp_name: The name of the comp to use if use_comp_name is True
+            :param render_scene: Whether to get the render scene template
 
-            :returns: The output location for the render queue item
+            :returns: The output location for the render queue item or render scene file path
         """
         template_file_name = os.path.basename(render_queue_template)
 
         # Check if the template is a movie format or treat it as a sequence
-        # TODO: Should update the mov_render_template name to be more generic in the future
+        # Decide which template to use based on the use_comp_name and render_scene flags
+        # This is easier to read and maintain than nested if statements
         if any(template_file_name.startswith(fmt) for fmt in self.render_preset_movie_formats):
-            templateName = self._app.get_setting("mov_render_template")
+            template_map = {
+                (True, True): "comp_render_scene_template",
+                (True, False): "mov_render_comp_template",
+                (False, True): "render_scene_template",
+                (False, False): "mov_render_template",
+            }
         else:
-            templateName = self._app.get_setting("seq_render_template")
+            template_map = {
+                (True, True): "comp_render_scene_template",
+                (True, False): "seq_render_comp_template",
+                (False, True): "render_scene_template",
+                (False, False): "seq_render_template",
+            }
+
+        templateName = self._app.get_setting(template_map[(use_comp_name, render_scene)])
 
         template = self._app.engine.get_template_by_name(templateName)
 
@@ -835,6 +1001,7 @@ class AppDialog(QtGui.QWidget):
         fields['name'] = match.group(3)
         fields['version'] = int(match.group(5))
         fields['ext'] = template_file_name.split("_")[0]
+        fields['ae_comp_name'] = comp_name
 
         # Add in a %04d number if it's a sequence then strip it out to be [####] for AE
         if 'SEQ' in template.keys:
@@ -927,6 +1094,7 @@ class AppDialog(QtGui.QWidget):
         self.ui.applyButton.setEnabled(state)
         self.ui.addButton.setEnabled(state)
         self.ui.submitButton.setEnabled(state)
+        self.ui.renderButton.setEnabled(state)
 
     #####################################################################################################
     # Events
@@ -1268,7 +1436,7 @@ class AppDialog(QtGui.QWidget):
     ####################################
     # Deadline Submission
     ####################################
-    def submit_to_deadline(self, save_project=True):
+    def submit_to_deadline(self):
         """
             Submit the render queue items to Deadline
         """
@@ -1285,22 +1453,9 @@ class AppDialog(QtGui.QWidget):
         # Extract the major.minor version number
         version = '.'.join(app_version.split('x')[0].split('.')[:2])
 
-        ## Run the project checks ##
-        logger.debug("Running project checks")
-
-        # If there is an active project
-        if not self.adobe.app.project:
-            self.warning_box("No project open", "Please open a project before submitting to Deadline")
-            return
-
-        # If the project is not saved
-        if not self.adobe.app.project.file:
-            self.warning_box("Project not saved", "Please save the project before submitting to Deadline")
-            return
-
-        # If there are no render queue items
-        if self.adobe.app.project.renderQueue.numItems == 0:
-            self.warning_box("No render queue items", "Please add some render queue items to submit to Deadline")
+        project_check = self.run_project_checks()
+        if not project_check:
+            self.toggle_buttons()
             return
 
         # If there are rows in the table
@@ -1310,35 +1465,8 @@ class AppDialog(QtGui.QWidget):
 
         logger.debug("Project Checks passed, proceeding with submission")
 
-        if save_project == QtGui.QMessageBox.Yes:
-            # Save and create a copy of the current project
-            self.adobe.app.project.save()
-            logger.info('Project saved')
-        else:
-            logger.info('Project not saved')
-
-        logger.debug("Creating backup of project")
-        backup_location = os.path.join(os.path.dirname(self.adobe.app.project.file.fsName), "deadline_submission_backup")
-        if not os.path.exists(backup_location):
-            # Create the backup directory if it doesn't exist
-            logger.debug("Creating backup directory: %s" % backup_location)
-            os.makedirs(backup_location, exist_ok=True)
-
-        backup_file = os.path.join(backup_location, self.adobe.app.project.file.name)
-        backup_file = backup_file.replace('.aep', '_%s.aep' % datetime.datetime.now().strftime("%Y%m%d_%H%M%S"))
-
-        # Copy the project to the backup location
-        try:
-            logger.debug("Copying project to backup location: %s" % backup_file)
-            shutil.copy(self.adobe.app.project.file.fsName, backup_file)
-            logger.info('Backup created: %s' % backup_file)
-
-        except Exception as e:
-            logger.error("Failed to create backup: %s" % e)
-            error = traceback.format_exc()
-
-            logger.error("%s" % error)
-            backup_file = self.adobe.app.project.file.fsName  # Fallback to original file if backup fails for deadline submission
+        self.adobe.app.project.save()
+        logger.info('Project saved')
 
         # Get Deadline Settings
         current_deadline_settings = self.get_deadline_settings()
@@ -1362,6 +1490,14 @@ class AppDialog(QtGui.QWidget):
             render_queue_item = self.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
             statusItem = self.ui.compTableWidget.item(row, 1)
+            useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
+            compName = render_queue_item.comp.name
+            render_queue_template = self.get_render_queue_template(row)
+
+            if useCompNameCheckBox.checkState() == QtCore.Qt.Checked:
+                use_comp_name = True
+            else:
+                use_comp_name = False
 
             logger.debug("Running render queue item Checks: %s" % render_queue_item.comp.name)
 
@@ -1397,6 +1533,38 @@ class AppDialog(QtGui.QWidget):
 
             logger.debug("Render queue item checks passed")
 
+            # Grab the output folder from templates
+            render_scene_file_path = self.get_shotgrid_template(render_queue_template, use_comp_name, compName, True)
+
+            # Create the output folder if it doesn't already exist
+            render_scene_file_directory = os.path.dirname(render_scene_file_path)
+
+            if not os.path.exists(render_scene_file_directory):
+                os.makedirs(render_scene_file_directory)
+
+            # Debugging
+            logger.debug("Render Scene File: %s" % render_scene_file_path)
+            logger.debug("Render Scene File Directory: %s" % render_scene_file_directory)
+            logger.debug("Comp Name: %s" % render_queue_item.comp.name)
+
+            # Copy the current project file to the render scene file path
+            try:
+                logger.debug("Copying project file to render scene location: %s" % render_scene_file_path)
+                shutil.copy(self.adobe.app.project.file.fsName, render_scene_file_path)
+                logger.info('Copy created: %s' % render_scene_file_path)
+
+            except Exception as e:
+                logger.error("Failed to create render scene backup: %s" % e)
+                error = traceback.format_exc()
+                logger.error("%s" % error)
+                self.deadline_error_message += "Failed to create render scene backup: %s\n" % render_queue_item.comp.name
+
+                # Update the status icon
+                statusItem.setIcon(self.ui.errorIcon)
+                statusItem.setToolTip("Error - Failed to create render scene backup")
+                includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                continue
+
             try:
                 # Submit the render queue item to Deadline
                 logger.debug("Submitting render queue item: %s" % render_queue_item.comp.name)
@@ -1406,7 +1574,7 @@ class AppDialog(QtGui.QWidget):
                                                           layers=False,
                                                           previous_job_id=previous_job_id,
                                                           version=version,
-                                                          render_file=backup_file)
+                                                          render_file=render_scene_file_path)
 
                 logger.debug("Render queue item submitted to Deadline: %s" % render_queue_item.comp.name)
 
@@ -1440,7 +1608,14 @@ class AppDialog(QtGui.QWidget):
         else:
             self.message_box("Deadline Submission", "Submission completed successfully.\n\n%d jobs submitted to Deadline." % num_successful_submissions)
 
-    def submit_render_queue_item_to_deadline(self, render_queue_item, deadline_settings, project_path, layers, previous_job_id, version, render_file):
+    def submit_render_queue_item_to_deadline(self,
+                                             render_queue_item,
+                                             deadline_settings,
+                                             project_path,
+                                             layers,
+                                             previous_job_id,
+                                             version,
+                                             render_file):
         """
             Submit the render queue item to Deadline
 
@@ -1573,7 +1748,6 @@ class AppDialog(QtGui.QWidget):
         # Create plugin info file
         with open(plugin_info_path, "w") as plugin_info:
 
-            #plugin_info.write(f"SceneFile={project_path}\n"
             plugin_info.write(f"SceneFile={render_file}\n")
             plugin_info.write(f"Comp={comp_name}\n")
 
@@ -1633,14 +1807,18 @@ class AppDialog(QtGui.QWidget):
         save_project = QtGui.QMessageBox.question(
             self,
             "Save Project",
-            "Do you want to save the project before submitting to Deadline? \n\nIt's recommended to save the project to ensure whats being submitted is up to date.",
+            "Saving the project is required before submitting to Deadline. Do you want to save the project now?",
             QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
             QtGui.QMessageBox.Yes,
         )
 
+        # Return if the user selects No
+        if save_project == QtGui.QMessageBox.No:
+            return
+
         logger.debug("Applying settings and submitting to Deadline")
         self.apply_to_render_queue_items()
-        self.submit_to_deadline(save_project=save_project)
+        self.submit_to_deadline()
 
     ####################################
     # Deadline Lists
