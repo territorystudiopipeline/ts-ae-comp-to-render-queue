@@ -324,6 +324,7 @@ class AppDialog(QtGui.QWidget):
         self.ui.renderButton.clicked.connect(self.render_current_queue_items)
         self.ui.addButton.clicked.connect(self.create_render_queue_items)
         self.ui.applyButton.clicked.connect(self.apply_to_render_queue_items)
+        self.ui.refreshButton.clicked.connect(self.create_table_entries)
         self.ui.cancelButton.clicked.connect(self.close)
         self.ui.deadlinePanel.toggle_button.clicked.connect(self.populate_deadline_settings)
 
@@ -346,6 +347,11 @@ class AppDialog(QtGui.QWidget):
     def refresh_frame_range(self, frameRangeComboBox, frameRangeLineEdit, renderQueueItem):
         """
             Enable the frame range line edit if the custom option is selected
+
+            Arguments:
+                frameRangeComboBox: The frame range combo box
+                frameRangeLineEdit: The frame range line edit
+                renderQueueItem: The render queue item
         """
         if frameRangeComboBox.currentText() == self.CUSTOM_TEXT:
             # Clear the text
@@ -601,7 +607,7 @@ class AppDialog(QtGui.QWidget):
                 None
 
             Returns:
-                True if successful, False otherwise
+                Boolean: True if successful, False if not
         """
 
         self.toggle_buttons(False)
@@ -731,9 +737,12 @@ class AppDialog(QtGui.QWidget):
         """
             Get the frame range to render
 
-            :param comp: The comp to get the frame range for
+            Arguments:
+                comp: The comp to get the frame range for
+                row: The row in the table
 
-            :returns: A list containing the start and end frame to render
+            Returns:
+                tuple: (startFrame, endFrame)
         """
         startFrame = None
         endFrame = None
@@ -855,7 +864,11 @@ class AppDialog(QtGui.QWidget):
         """
             Get the render queue template to use for the render queue item
 
-            :returns: The render queue template to use for the render queue item
+            Arguments:
+                row: The row in the table
+
+            Returns:
+                The render queue template to use for the render queue item
         """
         render_queue_template = None
 
@@ -868,6 +881,9 @@ class AppDialog(QtGui.QWidget):
     def render_current_queue_items(self):
         """
             Process and render the current render queue items
+
+            Arguments:
+                None
 
             returns: None
         """
@@ -893,7 +909,7 @@ class AppDialog(QtGui.QWidget):
             Arguments:
                 None
 
-            :returns: True if the project checks pass, False otherwise
+            Returns: True if the project checks pass, False otherwise
         """
         logger.debug("Running project checks")
 
@@ -920,8 +936,11 @@ class AppDialog(QtGui.QWidget):
         """
             Display an alert box
 
-            :param title: The title of the alert box
-            :param text: The text of the alert box
+            Arguments:
+                title: The title of the alert box
+                text: The text of the alert box
+
+            Returns: None
         """
         QtGui.QMessageBox.critical(
             self,
@@ -935,8 +954,11 @@ class AppDialog(QtGui.QWidget):
         """
             Display a warning box
 
-            :param title: The title of the warning box
-            :param text: The text of the warning box
+            Arguments:
+                title: The title of the warning box
+                text: The text of the warning box
+
+            Returns: None
         """
         logger.debug("Displaying Warning Box: %s" % text)
         # Display the warning box
@@ -952,8 +974,11 @@ class AppDialog(QtGui.QWidget):
         """
             Display a message box
 
-            :param title: The title of the message box
-            :param text: The text of the message box
+            Arguments:
+                title: The title of the message box
+                text: The text of the message box
+
+            Returns: None
         """
         logger.debug("Displaying Message Box: %s" % text)
         # Display the message box
@@ -1073,7 +1098,7 @@ class AppDialog(QtGui.QWidget):
             Arguments:
                 comp_name: The name of the comp to find
 
-            :returns: The render queue item
+            Returns: The render queue item
         """
         renderQueueItems = self.adobe.app.project.renderQueue.items
         for i in range(1, self.adobe.app.project.renderQueue.numItems+1):
@@ -1086,9 +1111,10 @@ class AppDialog(QtGui.QWidget):
         """
             Import the preset project
 
-            :param render_queue_template: The template to use for the render queue item
+            Arguments:
+                render_queue_template: The template to use for the render queue item
 
-            :returns: The imported project
+            Returns: The imported project
         """
         importProjectFolder = None
 
@@ -1113,12 +1139,16 @@ class AppDialog(QtGui.QWidget):
         """
             Toggle the buttons to be enabled or disabled
 
-            :param state: The state to set the buttons to
+            Arguments:
+                state: Whether to enable or disable the buttons
+
+            Returns: None
         """
         self.ui.applyButton.setEnabled(state)
         self.ui.addButton.setEnabled(state)
         self.ui.submitButton.setEnabled(state)
         self.ui.renderButton.setEnabled(state)
+        self.ui.refreshButton.setEnabled(state)
 
     #####################################################################################################
     # Events
@@ -1127,9 +1157,11 @@ class AppDialog(QtGui.QWidget):
         """
         Event filter to void mouse scroll events for specific widgets.
 
-        :param obj: The object to filter events for
-        :param event: The event to filter
-        :returns: True if the event was handled, False otherwise
+        Arguments:
+            obj: The object that received the event.
+            event: The event that was received.
+        Returns:
+            bool: True if the event is handled, False otherwise.
         """
         if event.type() == QtCore.QEvent.Wheel and isinstance(obj, QtGui.QComboBox):
             return True  # Ignore the wheel event
@@ -1142,7 +1174,10 @@ class AppDialog(QtGui.QWidget):
         """
             Get the row under the mouse cursor
 
-            :returns: The row under the mouse cursor
+            Arguments:
+                None
+            Returns:
+                int: The row under the mouse cursor
         """
 
         pos = QtGui.QCursor.pos()
@@ -1215,7 +1250,8 @@ class AppDialog(QtGui.QWidget):
         """
             Match the selected rows to the row under the mouse cursor
 
-            :returns: None
+            Returns:
+                None
         """
 
         current_row = self.get_row_from_cursor()
@@ -1296,6 +1332,8 @@ class AppDialog(QtGui.QWidget):
 
             Arguments:
                 format_text: The text to display on the progress bar
+
+            Returns: None
         """
         self.ui.progressBar.setVisible(True)
         self.ui.progressBar.setValue(0)
@@ -1325,6 +1363,9 @@ class AppDialog(QtGui.QWidget):
     def get_deadline_settings(self):
         """
             Get the current Deadline settings from the UI
+
+            Arguments:
+                None
 
             Returns:
                 dict: A dictionary containing the current Deadline settings
