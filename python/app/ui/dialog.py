@@ -47,10 +47,53 @@ class CollapsiblePanel(QtGui.QWidget):
         self.content_frame.setVisible(False)
         self.toggle_button.setText(f"▶ {title}")
 
+        # Set styling to show border around content frame
+        self.content_frame.setFrameShape(QtGui.QFrame.StyledPanel)
+        self.content_frame.setFrameShadow(QtGui.QFrame.Plain)
+
+        # Animation for toggling the panel
+        self.toggle_animation = QtCore.QPropertyAnimation(self.content_frame, b"maximumHeight")
+        self.toggle_animation.setDuration(100)
+        self._collapsed_height = 0
+        self._expanded_height = 0  # Will be set on first expand
+
     def toggle_panel(self):
+
         is_visible = self.content_frame.isVisible()
-        self.content_frame.setVisible(not is_visible)
+
+        if not is_visible and self._expanded_height == 0:
+            # Measure expanded height on first expand
+            self.content_frame.setVisible(True)
+            self.content_frame.setMaximumHeight(5000)  # Temporarily set to a large value
+            self._expanded_height = self.content_frame.sizeHint().height()
+            self.content_frame.setVisible(False)
+
+        start_height = self._expanded_height if is_visible else self._collapsed_height
+        end_height = self._collapsed_height if is_visible else self._expanded_height
+
+        self.toggle_animation.stop()
+        self.toggle_animation.setStartValue(start_height)
+        self.toggle_animation.setEndValue(end_height)
+        self.content_frame.setVisible(True)
+        self.toggle_animation.start()
+
         self.toggle_button.setText(f"{'▼' if not is_visible else '▶'} {self.toggle_button.text()[2:]}")
+        self.toggle_button.setStyleSheet(
+            "background-color: #444; " if is_visible else "background-color: #222;"
+        )
+
+        if is_visible:
+            # Hide after animation
+            self.toggle_animation.finished.connect(lambda: self.content_frame.setVisible(False))
+        else:
+            # Disconnect any previous connections to avoid multiple calls
+            try:
+                self.toggle_animation.finished.disconnect()
+            except Exception:
+                pass
+
+        # Remove focus from the button
+        self.toggle_button.clearFocus()
 
     def add_widget(self, widget):
         self.content_frame.layout().addWidget(widget)
@@ -554,6 +597,7 @@ class Ui_Dialog(object):
 
         self.mainLayout = QtGui.QVBoxLayout()
         self.mainLayout.setObjectName("mainLayout")
+        self.mainLayout.setSpacing(3)
 
         # Get the directory of the current script
         script_dir = os.path.dirname(__file__)
@@ -563,6 +607,9 @@ class Ui_Dialog(object):
         clear_icon_path = os.path.join(script_dir, 'icons', 'clear_icon.png')
         error_icon_path = os.path.join(script_dir, 'icons', 'error_icon.png')
         submit_icon_path = os.path.join(script_dir, 'icons', 'submit_icon.png')
+        add_icon_path = os.path.join(script_dir, 'icons', 'add_icon.png')
+        apply_icon_path = os.path.join(script_dir, 'icons', 'apply_icon.png')
+        refresh_icon_path = os.path.join(script_dir, 'icons', 'refresh_icon.png')
 
         # Static Icons
         self.warningIcon = QtGui.QIcon()
@@ -573,6 +620,12 @@ class Ui_Dialog(object):
         self.errorIcon.addPixmap(QtGui.QPixmap(error_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
         self.submitIcon = QtGui.QIcon()
         self.submitIcon.addPixmap(QtGui.QPixmap(submit_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.addIcon = QtGui.QIcon()
+        self.addIcon.addPixmap(QtGui.QPixmap(add_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.applyIcon = QtGui.QIcon()
+        self.applyIcon.addPixmap(QtGui.QPixmap(apply_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.refreshIcon = QtGui.QIcon()
+        self.refreshIcon.addPixmap(QtGui.QPixmap(refresh_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
 
         # Comp Table
         self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Use Comp Name", "Include"]
@@ -1100,23 +1153,64 @@ class Ui_Dialog(object):
         self.buttonsLayout = QtGui.QHBoxLayout()
         self.buttonsLayout.setObjectName("buttonsLayout")
 
+        # Side Quick Actions Menu Layout
+        self.sideMenuLayout = QtGui.QVBoxLayout()
+        self.sideMenuLayout.setObjectName("sideMenuLayout")
+
+        self.sideMenuFrame = QtGui.QGroupBox()
+        self.sideMenuFrame.setObjectName("sideMenuFrame")
+        self.sideMenuFrame.setTitle("Actions")
+        self.sideMenuFrame.setAlignment(QtCore.Qt.AlignHCenter)
+        self.sideMenuFrame.setLayout(self.sideMenuLayout)
+        self.sideMenuFrame.layout().setContentsMargins(3, 10, 3, 10)
+        self.sideMenuFrame.layout().setSpacing(5)
+        self.sideMenuFrame.setMaximumWidth(65)
+
         # Submit to Deadline
         self.submitButton = QtGui.QPushButton(Dialog)
         self.submitButton.setObjectName("submitButton")
         self.submitButton.setText("Submit to Deadline")
         self.submitButton.setMinimumHeight(30)
+        self.submitButton.setStyleSheet("background-color: SteelBlue; color: white;")
 
         # Add Selected To Queue
         self.addButton = QtGui.QPushButton(Dialog)
         self.addButton.setObjectName("addButton")
-        self.addButton.setText("Add To Queue")
-        self.addButton.setMinimumHeight(30)
+        self.addButton.setIcon(self.addIcon)
+        self.addButton.setIconSize(QtCore.QSize(30, 30))
+        self.addButton.setToolTip("Add Selected Comps To Render Queue")
+        self.addButton.setMinimumHeight(40)
+        self.addButton.setMaximumHeight(40)
+        self.addButton.setMinimumWidth(40)
+        self.addButton.setMaximumWidth(40)
 
         # Apply To Render Queue
         self.applyButton = QtGui.QPushButton(Dialog)
         self.applyButton.setObjectName("applyButton")
-        self.applyButton.setText("Apply")
-        self.applyButton.setMinimumHeight(30)
+        self.applyButton.setIcon(self.applyIcon)
+        self.applyButton.setIconSize(QtCore.QSize(30, 30))
+        self.applyButton.setToolTip("Apply Changes To Render Queue")
+        self.applyButton.setMinimumHeight(40)
+        self.applyButton.setMaximumHeight(40)
+        self.applyButton.setMinimumWidth(40)
+        self.applyButton.setMaximumWidth(40)
+
+        # Refresh Queue
+        self.refreshButton = QtGui.QPushButton(Dialog)
+        self.refreshButton.setObjectName("refreshButton")
+        self.refreshButton.setToolTip("Refresh Render Queue")
+        self.refreshButton.setIcon(self.refreshIcon)
+        self.refreshButton.setIconSize(QtCore.QSize(30, 30))
+        self.refreshButton.setMinimumHeight(40)
+        self.refreshButton.setMaximumHeight(40)
+        self.refreshButton.setMinimumWidth(40)
+        self.refreshButton.setMaximumWidth(40)
+
+        # Render Queue
+        self.renderButton = QtGui.QPushButton(Dialog)
+        self.renderButton.setObjectName("renderButton")
+        self.renderButton.setText("Render")
+        self.renderButton.setMinimumHeight(30)
 
         # Cancel
         self.cancelButton = QtGui.QPushButton(Dialog)
@@ -1124,13 +1218,19 @@ class Ui_Dialog(object):
         self.cancelButton.setText("Cancel")
         self.cancelButton.setMinimumHeight(30)
 
-        self.buttonsLayout.addWidget(self.applyButton)
-        self.buttonsLayout.addWidget(self.addButton)
+        self.buttonsLayout.addWidget(self.renderButton)
         self.buttonsLayout.addWidget(self.submitButton)
         self.buttonsLayout.addWidget(self.cancelButton)
 
+        self.sideMenuLayout.addWidget(self.addButton, alignment=QtCore.Qt.AlignHCenter)
+        self.sideMenuLayout.addWidget(self.applyButton, alignment=QtCore.Qt.AlignHCenter)
+        self.sideMenuLayout.addWidget(self.refreshButton, alignment=QtCore.Qt.AlignHCenter)
+        self.sideMenuLayout.addStretch()
+
         self.mainLayout.addLayout(self.buttonsLayout)
+
         self.horizontalLayout.addLayout(self.mainLayout)
+        self.horizontalLayout.addWidget(self.sideMenuFrame)
 
         self.retranslateUi(Dialog)
         QtCore.QMetaObject.connectSlotsByName(Dialog)
@@ -1147,6 +1247,6 @@ class Ui_Dialog(object):
     def retranslateUi(self, Dialog):
         _translate = QtCore.QCoreApplication.translate
         Dialog.setWindowTitle(_translate("Dialog", "Add Selected Comps to Render Queue"))
-        self.addButton.setText(_translate("Dialog", "Add To Queue"))
+        #self.addButton.setText(_translate("Dialog", "Add To Queue"))
         self.cancelButton.setText(_translate("Dialog", "Cancel"))
 from . import resources_rc
