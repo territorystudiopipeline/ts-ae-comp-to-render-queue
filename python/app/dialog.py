@@ -13,6 +13,7 @@ import sgtk
 import os
 import re
 import time
+import json
 from contextlib import contextmanager
 import traceback
 
@@ -597,6 +598,174 @@ class AppDialog(QtGui.QWidget):
         logger.debug("Total Time: %s" % (time.time() - self.start_time))
         logger.debug("Total Render Queue Items Updated: %s" % count)
 
+    def generate_manifest_file_for_queue_item(self, render_queue_item, render_scene_file_path):
+        """
+            Generate a manifest file (json) for the render queue item that records
+            fonts and plugins/effects used in the render comp.
+
+            If there are nested comps, the manifest will also include the fonts and plugins/effects used in those nested comps.
+
+            Arguments:
+                render_queue_item: The render queue item to generate the manifest for
+                render_scene_file_path: The path to the render scene file to be rendered
+        """
+
+        comp = render_queue_item.comp
+
+        manifest_data = {
+            "scene_name": self.adobe.app.project.file.name,
+            "scene_file": render_scene_file_path,
+            "comp_name": comp.name,
+            "comp_id": getattr(comp, 'id', None),
+            "comp_frame_rate": comp.frameRate,
+            "comp_duration": comp.duration,
+            "nested_comps": [],
+            "fonts": set(),
+            "plugins_effects": {
+                "Native": set(),
+                "ThirdParty": set()
+            }
+        }
+
+        # Get the fonts and plugins/effects used in the comp
+        manifest_data = self.get_fonts_and_plugins_for_comp(comp, manifest_data)
+
+        # Convert the sets to lists for json serialization
+        manifest_data["fonts"] = [
+            {"name": f[0], "family": f[1], "style": f[2]} for f in manifest_data["fonts"]
+        ]
+        manifest_data["plugins_effects"] = {
+            "Native": [{"name": n[0], "matchName": n[1]} for n in manifest_data["plugins_effects"]["Native"]],
+            "ThirdParty": [{"name": t[0], "matchName": t[1]} for t in manifest_data["plugins_effects"]["ThirdParty"]]
+        }
+
+        # Save the manifest data to a json file in the same location as the render scene file
+        manifest_file_path = os.path.splitext(render_scene_file_path)[0] + "_manifest.json"
+
+        with open(manifest_file_path, "w") as manifest_file:
+            json.dump(manifest_data, manifest_file, indent=4)
+
+    def get_fonts_and_plugins_for_comp(self, comp, manifest_data=None, visited_comps=None):
+        """
+            Collects fonts and plugins/effects used in the comp and nested comps.
+
+            Args:
+                comp: The comp to get the fonts and plugins/effects for.
+                manifest_data: The manifest data to add the fonts and plugins/effects to. If None, initializes a new dict.
+                visited_comps: Set of comp identifiers already processed to avoid redundant recursion.
+
+            Returns:
+                dict: The manifest data with the fonts and plugins/effects added.
+        """
+        if manifest_data is None:
+            manifest_data = {
+                "fonts": set(),
+                "plugins_effects": set(),
+                "nested_comps": []
+            }
+
+        if visited_comps is None:
+            visited_comps = set()
+
+        if "nested_comps" not in manifest_data:
+            manifest_data["nested_comps"] = []
+
+        # Use comp name and id as a unique identifier for the comp to prevent redundant processing
+        comp_identifier = (comp.name, getattr(comp, 'id', None))
+        if comp_identifier in visited_comps:
+            logger.debug("Comp %s has already been processed, skipping" % comp.name)
+            return manifest_data
+
+        visited_comps.add(comp_identifier)
+
+        # Only add to nested_comps if not the root comp and not already present
+        if manifest_data.get("comp_name") != comp.name:
+            if comp_identifier not in [(c["comp_name"], c["comp_id"]) for c in manifest_data["nested_comps"]]:
+                manifest_data["nested_comps"].append({
+                    "comp_name": comp.name,
+                    "comp_id": getattr(comp, 'id', None)
+                })
+
+        def collect_effects_on_layer(layer, manifest_data):
+            """
+                Collects the plugins/effects used on a layer and adds them to the manifest data
+
+                Arguments:
+                    layer: The layer to collect the plugins/effects from
+                    manifest_data: The manifest data to add the plugins/effects to
+            """
+            effects = []
+            num_of_properties = layer.numProperties
+            for p in range(1, num_of_properties + 1):
+                property = layer.property(p)
+
+                if property and property.matchName == "ADBE Effect Parade":
+                    num_of_effects = property.numProperties
+                    logger.debug("Number of effects on layer: %s" % num_of_effects)
+
+                    for e in range(1, num_of_effects + 1):
+                        effect = property.property(e)
+                        effect_name = getattr(effect, "name", None)
+                        effect_match_name = getattr(effect, 'matchName', None)
+
+                        # Here we classify the effect as native or third party based on the match name
+                        if effect_match_name.startswith("ADBE") or effect_match_name.startswith("CC"):
+                            manifest_data["plugins_effects"]["Native"].add((effect_name, effect_match_name))
+
+                        else:
+                            manifest_data["plugins_effects"]["ThirdParty"].add((effect_name, effect_match_name))
+
+                        logger.debug("Added effect to manifest: %s" % effect_name)
+
+        num_of_layers = comp.numLayers
+        logger.debug("Getting fonts and plugins/effects for comp: %s, Number of layers: %s" % (comp.name, num_of_layers))
+        self.show_progress_bar(format_text="Processing layers for comp %s..." % (comp.name), primary=False, max=num_of_layers)
+
+        for i, layer in enumerate(self._app.engine.iter_collection(comp.layers), start=1):
+            self.update_progress_bar(int(i), primary=False)
+            logger.debug("Checking layer %s of %s" % (i, num_of_layers))
+
+            logger.debug("Layer: %s" % layer)
+            layer_source = layer.source
+            logger.debug("Source: %s" % layer_source)
+
+            if self._app.engine.is_item_of_type(layer_source, "CompItem"):
+                nested_comp = layer_source
+                logger.debug("Found nested comp: %s" % nested_comp.name)
+                collect_effects_on_layer(layer, manifest_data)
+                self.get_fonts_and_plugins_for_comp(nested_comp, manifest_data, visited_comps)
+
+            elif self._app.engine.is_item_of_type(layer, "TextLayer"):
+                logger.debug("Found text layer: %s" % layer.name)
+                text_source = layer.property("Source Text")
+                num_keys = text_source.numKeys
+
+                if num_keys > 0:
+                    logger.debug("Text source is animated, number of keyframes: %s" % num_keys)
+
+                    for key_index in range(1, num_keys + 1):
+                        text_document = text_source.keyValue(key_index)
+                        font = text_document.font
+                        font_family = getattr(text_document, 'fontFamily', None)
+                        font_style = getattr(text_document, 'fontStyle', None)
+                        logger.debug("Added font from keyframe %s: %s, %s, %s" % (key_index, font, font_family, font_style))
+                        manifest_data["fonts"].add((font, font_family, font_style))
+                else:
+                    logger.debug("Text source is not animated, getting font from static value")
+                    text_document = text_source.value
+                    font = text_document.font
+                    font_family = getattr(text_document, 'fontFamily', None)
+                    font_style = getattr(text_document, 'fontStyle', None)
+                    logger.debug("Added font: %s, %s, %s" % (font, font_family, font_style))
+                    manifest_data["fonts"].add((font, font_family, font_style))
+                collect_effects_on_layer(layer, manifest_data)
+
+            else:
+                collect_effects_on_layer(layer, manifest_data)
+
+        self.hide_progress_bar(primary=False)
+        return manifest_data
+
     def process_queue_items_for_render(self):
         """
             Process the render queue items for rendering locally
@@ -638,33 +807,29 @@ class AppDialog(QtGui.QWidget):
         else:
             return False
 
-        # Show the progress bar
-        self.show_progress_bar(format_text="Updating render queue items status's...")
+        num_items = self.ui.compTableWidget.rowCount()
+        steps_per_item = 2  # manifest + copy
+        total_steps = num_items * steps_per_item
+        current_step = 0
 
-        # Get the render queue items from the table
+        self.show_progress_bar(format_text="Processing render queue items...")
+
         count = 0
-        for row in range(self.ui.compTableWidget.rowCount()):
+        for row in range(num_items):
             tableItem = self.ui.compTableWidget.item(row, 0)
             statusItem = self.ui.compTableWidget.item(row, 1)
             renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
             useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
 
-            # Emit progress
-            self.update_progress_bar(int(row / self.ui.compTableWidget.rowCount() * 100))
+            render_queue_item = tableItem.data(QtCore.Qt.UserRole)
+            comp = render_queue_item.comp
+            compName = comp.name
 
-            # Check if the item is checked
-            if includeCheckBox.checkState() == QtCore.Qt.Checked:
-                render_queue_item = tableItem.data(QtCore.Qt.UserRole)
-                comp = render_queue_item.comp
-                compName = comp.name
+            if includeCheckBox.checkState() == QtCore.Qt.Checked and render_queue_item.status != self.adobe.RQItemStatus.NEEDS_OUTPUT:
                 render_queue_template = self.get_render_queue_template(row)
                 frame_range = self.get_frame_range(comp, row)
-
-                if useCompNameCheckBox.checkState() == QtCore.Qt.Checked:
-                    use_comp_name = True
-                else:
-                    use_comp_name = False
+                use_comp_name = useCompNameCheckBox.checkState() == QtCore.Qt.Checked
 
                 logger.debug("Use Comp Name: %s" % use_comp_name)
 
@@ -684,7 +849,34 @@ class AppDialog(QtGui.QWidget):
                 logger.debug("Render Scene File Directory: %s" % render_scene_file_directory)
                 logger.debug("Comp Name: %s" % comp.name)
 
-                # Creates a copy of the project file for the render scene
+                # Manifest generation step
+                current_step += 1
+                self.update_progress_bar_format(f"Generating manifest for {compName}...")
+                self.update_progress_bar(int(current_step / total_steps * 100))
+                try:
+                    logger.debug("Generating manifest file for render queue item: %s" % render_queue_item.comp.name)
+                    self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+                    logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
+                except Exception as e:
+                    logger.error("Failed to generate manifest file: %s" % e)
+                    error = traceback.format_exc()
+                    logger.error("%s" % error)
+                    self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
+
+                    # Update the status icon
+                    statusItem.setIcon(self.ui.errorIcon)
+                    statusItem.setToolTip("Error - Failed to generate manifest file")
+                    includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+
+                    continue
+
+                self.update_progress_bar(int(current_step / total_steps * 100))
+
+                # Project file copy step
+                current_step += 1
+                self.update_progress_bar_format(f"Copying project file for {compName}...")
+                self.update_progress_bar(int(current_step / total_steps * 100))
                 try:
                     logger.debug("Copying project file to render scene location: %s" % render_scene_file_path)
                     shutil.copy(self.adobe.app.project.file.fsName, render_scene_file_path)
@@ -703,6 +895,8 @@ class AppDialog(QtGui.QWidget):
                     includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
                     continue
 
+                self.update_progress_bar(int(current_step / total_steps * 100))
+
                 # Log
                 logger.debug("Render Queue Item for: %s has been processed" % render_queue_item.comp.name)
                 count += 1
@@ -714,17 +908,21 @@ class AppDialog(QtGui.QWidget):
 
             else:
                 # Change the render queue item status to UNQUEUED if unchecked
-                render_queue_item = tableItem.data(QtCore.Qt.UserRole)
                 render_queue_item.render = False # Set to unqueued
                 logger.debug("Render Queue Item for: %s has been set to UNQUEUED" % render_queue_item.comp.name)
 
                 # Update the status icon
                 statusItem = self.ui.compTableWidget.item(row, 1)
                 statusItem.setIcon(self.ui.warningIcon)
-                statusItem.setToolTip("UNQUEUED - Not Included in Render Queue")
+
+                if render_queue_item.status == self.adobe.RQItemStatus.NEEDS_OUTPUT:
+                    statusItem.setToolTip("NEEDS OUTPUT - Template Not Applied | Needs Output")
+                else:
+                    statusItem.setToolTip("UNQUEUED - Not Included in Render Queue")
 
         # Show progress at 100%
         self.update_progress_bar(100)
+        self.update_progress_bar_format("Finished processing render queue items")
         time.sleep(0.2)
         self.hide_progress_bar()
 
@@ -899,8 +1097,6 @@ class AppDialog(QtGui.QWidget):
         # Render the current render queue items
         logger.debug("Starting render of current render queue items")
         self.adobe.app.project.renderQueue.renderAsync()
-
-        self.close()
 
     def run_project_checks(self):
         """
@@ -1326,35 +1522,64 @@ class AppDialog(QtGui.QWidget):
     # Progress Bar
     #####################################################################################################
 
-    def show_progress_bar(self, format_text=None):
+    def show_progress_bar(self, format_text=None, max=100,primary=True):
         """
             Show the progress bar
 
             Arguments:
                 format_text: The text to display on the progress bar
+                primary: Whether to show the primary progress bar or the secondary progress bar
 
             Returns: None
         """
-        self.ui.progressBar.setVisible(True)
-        self.ui.progressBar.setValue(0)
-        if format_text:
-            self.ui.progressBar.setFormat(f"{format_text} %p%")
+        if primary:
+            self.ui.progressBar.setVisible(True)
+            self.ui.progressBar.setMaximum(max)
+            self.ui.progressBar.setValue(0)
+            if format_text:
+                self.ui.progressBar.setFormat(f"{format_text} %p%")
+        else:
+            self.ui.secondaryProgressBar.setVisible(True)
+            self.ui.secondaryProgressBar.setMaximum(max)
+            self.ui.secondaryProgressBar.setValue(0)
+            if format_text:
+                self.ui.secondaryProgressBar.setFormat(f"{format_text} %p%")
 
-    def hide_progress_bar(self):
+    def hide_progress_bar(self, primary=True):
         """
             Hide the progress bar
         """
-        self.ui.progressBar.setVisible(False)
-        self.ui.progressBar.setValue(0)
-        self.ui.progressBar.setFormat("%p%")
+        if primary:
+            self.ui.progressBar.setVisible(False)
+            self.ui.progressBar.setValue(0)
+            self.ui.progressBar.setFormat("%p%")
+        else:
+            self.ui.secondaryProgressBar.setVisible(False)
+            self.ui.secondaryProgressBar.setValue(0)
+            self.ui.secondaryProgressBar.setFormat("%p%")
 
-    def update_progress_bar(self, value):
+
+    def update_progress_bar(self, value, primary=True):
         """
             Update the progress bar
             Arguments:
                 value: The value to set the progress bar to
         """
-        self.ui.progressBar.setValue(value)
+        if primary:
+            self.ui.progressBar.setValue(value)
+        else:
+            self.ui.secondaryProgressBar.setValue(value)
+
+    def update_progress_bar_format(self, format_text, primary=True):
+        """
+            Update the progress bar format
+            Arguments:
+                format_text: The text to display on the progress bar
+        """
+        if primary:
+            self.ui.progressBar.setFormat(f"{format_text} %p%")
+        else:
+            self.ui.secondaryProgressBar.setFormat(f"{format_text} %p%")
 
     ######################################################################################################
     # Deadline
@@ -1532,7 +1757,7 @@ class AppDialog(QtGui.QWidget):
             self.toggle_buttons()
             return
 
-        # If there are rows in the table
+        # If there are no rows in the table
         if self.ui.compTableWidget.rowCount() == 0:
             self.warning_box("No render queue items available", "Please add some render queue items or refresh the table to submit to Deadline")
             return
@@ -1639,9 +1864,30 @@ class AppDialog(QtGui.QWidget):
                 includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
                 continue
 
+            # Generate manifest file capturing hte currently used fonts and effects for this comp to be used by Deadline's asset tracking and syncing features
+            try:
+                # Update progress bar to show that we are generating the manifest file
+                self.update_progress_bar_format("Generating manifest file for %s" % render_queue_item.comp.name)
+                logger.debug("Generating manifest file for render queue item: %s" % render_queue_item.comp.name)
+                self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+                logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+            except Exception as e:
+                logger.error("Failed to generate manifest file: %s" % e)
+                error = traceback.format_exc()
+                logger.error("%s" % error)
+                self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
+
+                # Update the status icon
+                statusItem.setIcon(self.ui.errorIcon)
+                statusItem.setToolTip("Error - Failed to generate manifest file")
+                includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                continue
+
             try:
                 # Submit the render queue item to Deadline
                 logger.debug("Submitting render queue item: %s" % render_queue_item.comp.name)
+                self.update_progress_bar_format("Submitting %s to Deadline" % render_queue_item.comp.name)
+
                 self.submit_render_queue_item_to_deadline(render_queue_item=render_queue_item,
                                                           deadline_settings=current_deadline_settings,
                                                           project_path=project_path,
@@ -1670,6 +1916,7 @@ class AppDialog(QtGui.QWidget):
 
         # Show progress at 100%
         self.update_progress_bar(100)
+        self.update_progress_bar_format("Finished submitting to Deadline")
         time.sleep(0.2)
         self.hide_progress_bar()
 
