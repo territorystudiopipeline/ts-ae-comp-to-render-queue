@@ -1780,12 +1780,13 @@ class AppDialog(QtGui.QWidget):
 
         self.show_progress_bar(format_text="Submitting to Deadline")
 
-        # Submit the selected rows to Deadline
-        for row in range(self.ui.compTableWidget.rowCount()):
-
-            # Emit progress
-            self.update_progress_bar(int(row / self.ui.compTableWidget.rowCount() * 100))
-
+        # Loop through the render queue items in the table and submit them to Deadline if they are checked
+        # and queued in the render queue
+        num_rows = self.ui.compTableWidget.rowCount()
+        for row in range(num_rows):
+            # Emit overall progress
+            self.update_progress_bar(int(row / num_rows * 100))
+            QtGui.QApplication.processEvents()
             render_queue_item = self.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
             statusItem = self.ui.compTableWidget.item(row, 1)
@@ -1838,19 +1839,23 @@ class AppDialog(QtGui.QWidget):
             # Create the output folder if it doesn't already exist
             render_scene_file_directory = os.path.dirname(render_scene_file_path)
 
-            if not os.path.exists(render_scene_file_directory):
-                os.makedirs(render_scene_file_directory)
-
-            # Debugging
-            logger.debug("Render Scene File: %s" % render_scene_file_path)
-            logger.debug("Render Scene File Directory: %s" % render_scene_file_directory)
-            logger.debug("Comp Name: %s" % render_queue_item.comp.name)
-
-            # Copy the current project file to the render scene file path
+            # --- Secondary progress bar for per-row steps ---
+            self.show_progress_bar(format_text=f"Processing {compName}...", max=3, primary=False)
+            secondary_step = 0
+            # Step 1: Copy project file
             try:
-                logger.debug("Copying project file to render scene location: %s" % render_scene_file_path)
+                self.update_progress_bar_format(f"Copying project file for {compName}...", primary=False)
+                QtGui.QApplication.processEvents()
+
+                if not os.path.exists(render_scene_file_directory):
+                    os.makedirs(render_scene_file_directory, exist_ok=True)
+
                 shutil.copy(self.adobe.app.project.file.fsName, render_scene_file_path)
                 logger.info('Copy created: %s' % render_scene_file_path)
+
+                secondary_step += 1
+                self.update_progress_bar(secondary_step, primary=False)
+                QtGui.QApplication.processEvents()
 
             except Exception as e:
                 logger.error("Failed to create render scene backup: %s" % e)
@@ -1862,15 +1867,20 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.errorIcon)
                 statusItem.setToolTip("Error - Failed to create render scene backup")
                 includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                self.hide_progress_bar(primary=False)
                 continue
 
-            # Generate manifest file capturing hte currently used fonts and effects for this comp to be used by Deadline's asset tracking and syncing features
+            # Step 2: Generate manifest
             try:
-                # Update progress bar to show that we are generating the manifest file
-                self.update_progress_bar_format("Generating manifest file for %s" % render_queue_item.comp.name)
-                logger.debug("Generating manifest file for render queue item: %s" % render_queue_item.comp.name)
+                self.update_progress_bar_format(f"Generating manifest for {compName}...", primary=False)
+                QtGui.QApplication.processEvents()
                 self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+
                 logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+                secondary_step += 1
+                self.update_progress_bar(secondary_step, primary=False)
+                QtGui.QApplication.processEvents()
+
             except Exception as e:
                 logger.error("Failed to generate manifest file: %s" % e)
                 error = traceback.format_exc()
@@ -1881,13 +1891,13 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.errorIcon)
                 statusItem.setToolTip("Error - Failed to generate manifest file")
                 includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                self.hide_progress_bar(primary=False)
                 continue
 
+            # Step 3: Submit to Deadline
             try:
-                # Submit the render queue item to Deadline
-                logger.debug("Submitting render queue item: %s" % render_queue_item.comp.name)
-                self.update_progress_bar_format("Submitting %s to Deadline" % render_queue_item.comp.name)
-
+                self.update_progress_bar_format(f"Submitting {compName} to Deadline...", primary=False)
+                QtGui.QApplication.processEvents()
                 self.submit_render_queue_item_to_deadline(render_queue_item=render_queue_item,
                                                           deadline_settings=current_deadline_settings,
                                                           project_path=project_path,
@@ -1903,6 +1913,9 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.submitIcon)
                 statusItem.setToolTip("Submitted to Deadline")
                 num_successful_submissions += 1
+                secondary_step += 1
+                self.update_progress_bar(secondary_step, primary=False)
+                QtGui.QApplication.processEvents()
 
             except Exception as e:
                 logger.error("Failed to submit render queue item to Deadline: %s" % e)
@@ -1913,8 +1926,11 @@ class AppDialog(QtGui.QWidget):
                 # Update Status
                 statusItem.setIcon(self.ui.errorIcon)
                 statusItem.setToolTip("Failed to submit to Deadline - %s" % e)
+                self.hide_progress_bar(primary=False)
+                continue
 
-        # Show progress at 100%
+            self.hide_progress_bar(primary=False)
+        self.hide_progress_bar(primary=False)
         self.update_progress_bar(100)
         self.update_progress_bar_format("Finished submitting to Deadline")
         time.sleep(0.2)
