@@ -103,6 +103,9 @@ class AppDialog(QtGui.QWidget):
         # Set the window size
         self.resize(1000, self.ui.compTableWidget.sizeHint().height())
 
+        # Manifest cache to avoid redundant analysis of comps
+        self._manifest_cache = {}
+
     def populate_sg_fields(self):
         """
             Get the required field info from the project
@@ -612,23 +615,26 @@ class AppDialog(QtGui.QWidget):
 
         comp = render_queue_item.comp
 
-        manifest_data = {
-            "scene_name": self.adobe.app.project.file.name,
-            "scene_file": render_scene_file_path,
-            "comp_name": comp.name,
-            "comp_id": getattr(comp, 'id', None),
-            "comp_frame_rate": comp.frameRate,
-            "comp_duration": comp.duration,
-            "nested_comps": [],
-            "fonts": set(),
-            "plugins_effects": {
-                "Native": set(),
-                "ThirdParty": set()
+        comp_identifier = (comp.name, getattr(comp, 'id', None))
+        if comp_identifier in self._manifest_cache:
+            manifest_data = self._manifest_cache[comp_identifier].copy()
+        else:
+            manifest_data = {
+                "scene_name": self.adobe.app.project.file.name,
+                "scene_file": render_scene_file_path,
+                "comp_name": comp.name,
+                "comp_id": getattr(comp, 'id', None),
+                "comp_frame_rate": comp.frameRate,
+                "comp_duration": comp.duration,
+                "nested_comps": [],
+                "fonts": set(),
+                "plugins_effects": {
+                    "Native": set(),
+                    "ThirdParty": set()
+                }
             }
-        }
-
-        # Get the fonts and plugins/effects used in the comp
-        manifest_data = self.get_fonts_and_plugins_for_comp(comp, manifest_data)
+            manifest_data = self.get_fonts_and_plugins_for_comp(comp, manifest_data)
+            self._manifest_cache[comp_identifier] = manifest_data.copy()
 
         # Convert the sets to lists for json serialization
         manifest_data["fonts"] = [
@@ -645,7 +651,7 @@ class AppDialog(QtGui.QWidget):
         with open(manifest_file_path, "w") as manifest_file:
             json.dump(manifest_data, manifest_file, indent=4)
 
-    def get_fonts_and_plugins_for_comp(self, comp, manifest_data=None, visited_comps=None):
+    def get_fonts_and_plugins_for_comp(self, comp, manifest_data=None):
         """
             Collects fonts and plugins/effects used in the comp and nested comps.
 
@@ -660,23 +666,28 @@ class AppDialog(QtGui.QWidget):
         if manifest_data is None:
             manifest_data = {
                 "fonts": set(),
-                "plugins_effects": set(),
+                "plugins_effects": {
+                    "Native": set(),
+                    "ThirdParty": set()
+                },
                 "nested_comps": []
             }
-
-        if visited_comps is None:
-            visited_comps = set()
 
         if "nested_comps" not in manifest_data:
             manifest_data["nested_comps"] = []
 
         # Use comp name and id as a unique identifier for the comp to prevent redundant processing
         comp_identifier = (comp.name, getattr(comp, 'id', None))
-        if comp_identifier in visited_comps:
-            logger.debug("Comp %s has already been processed, skipping" % comp.name)
+        # Use cache to prevent redundant analysis and recursion
+        if comp_identifier in self._manifest_cache:
+            cached = self._manifest_cache[comp_identifier]
+            manifest_data["fonts"].update(cached["fonts"])
+            manifest_data["plugins_effects"]["Native"].update(cached["plugins_effects"]["Native"])
+            manifest_data["plugins_effects"]["ThirdParty"].update(cached["plugins_effects"]["ThirdParty"])
+            for nc in cached.get("nested_comps", []):
+                if nc not in manifest_data["nested_comps"]:
+                    manifest_data["nested_comps"].append(nc)
             return manifest_data
-
-        visited_comps.add(comp_identifier)
 
         # Only add to nested_comps if not the root comp and not already present
         if manifest_data.get("comp_name") != comp.name:
@@ -733,7 +744,7 @@ class AppDialog(QtGui.QWidget):
                 nested_comp = layer_source
                 logger.debug("Found nested comp: %s" % nested_comp.name)
                 collect_effects_on_layer(layer, manifest_data)
-                self.get_fonts_and_plugins_for_comp(nested_comp, manifest_data, visited_comps)
+                self.get_fonts_and_plugins_for_comp(nested_comp, manifest_data)
 
             elif self._app.engine.is_item_of_type(layer, "TextLayer"):
                 logger.debug("Found text layer: %s" % layer.name)
@@ -764,6 +775,9 @@ class AppDialog(QtGui.QWidget):
                 collect_effects_on_layer(layer, manifest_data)
 
         self.hide_progress_bar(primary=False)
+
+        # After analysis, cache the result
+        self._manifest_cache[comp_identifier] = manifest_data.copy()
         return manifest_data
 
     def process_queue_items_for_render(self):
