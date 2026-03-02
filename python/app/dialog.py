@@ -14,6 +14,7 @@ import os
 import re
 import time
 import json
+import sys
 from contextlib import contextmanager
 import traceback
 
@@ -64,6 +65,7 @@ class AppDialog(QtGui.QWidget):
         self._app = sgtk.platform.current_bundle()
         self.adobe = self._app.engine.adobe
 
+        self.ae_version = self.adobe.app.version
         self.current_project = self._app.context.project
         self.project_id = self.current_project["id"]
         self.project_name = self.current_project["name"]
@@ -71,6 +73,7 @@ class AppDialog(QtGui.QWidget):
 
         logger.debug(f"Current Project: {self.current_project}")
         logger.debug(f"Project ID: {self.project_id}")
+        logger.debug(f"AE Version: {self.ae_version}")
 
         # logging happens via a standard toolkit logger
         logger.info("Launching Add to render Queue Application...")
@@ -628,9 +631,9 @@ class AppDialog(QtGui.QWidget):
                 "comp_duration": comp.duration,
                 "nested_comps": [],
                 "fonts": set(),
-                "plugins_effects": {
-                    "Native": set(),
-                    "ThirdParty": set()
+                "effects": {
+                    "native_effects": set(),
+                    "third_party_effects": set()
                 }
             }
             manifest_data = self.get_fonts_and_plugins_for_comp(comp, manifest_data)
@@ -640,9 +643,9 @@ class AppDialog(QtGui.QWidget):
         manifest_data["fonts"] = [
             {"name": f[0], "family": f[1], "style": f[2]} for f in manifest_data["fonts"]
         ]
-        manifest_data["plugins_effects"] = {
-            "Native": [{"name": n[0], "matchName": n[1]} for n in manifest_data["plugins_effects"]["Native"]],
-            "ThirdParty": [{"name": t[0], "matchName": t[1]} for t in manifest_data["plugins_effects"]["ThirdParty"]]
+        manifest_data["effects"] = {
+            "native_effects": [{"name": n[0], "matchName": n[1]} for n in manifest_data["effects"]["native_effects"]],
+            "third_party_effects": [{"name": t[0], "matchName": t[1]} for t in manifest_data["effects"]["third_party_effects"]]
         }
 
         # Save the manifest data to a json file in the same location as the render scene file
@@ -650,6 +653,64 @@ class AppDialog(QtGui.QWidget):
 
         with open(manifest_file_path, "w") as manifest_file:
             json.dump(manifest_data, manifest_file, indent=4)
+
+    def generate_manifest_file_for_queue_item_jsx(self, render_queue_item, render_scene_file_path):
+        """
+        Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file.
+        """
+        def _after_effects_version_to_year(major_version):
+            """
+                Converts the major version number of After Effects to the corresponding year-based version string.
+                 - For versions 24 and above, it converts to a year-based version (e.g., 24 to 2024).
+
+                Arguments:
+                    major_version (str): The major version number of After Effects as a string.
+                Returns:
+                    str: The year-based version string for After Effects if major version is 24 or above,
+                    otherwise returns the original major version string.
+            """
+            try:
+                major_version_int = int(major_version)
+                if major_version_int >= 24:
+                    return str(2000 + major_version_int)
+                else:
+                    return major_version
+            except ValueError:
+                logger.error(f"Unable to parse After Effects version: {self.ae_version}")
+                return major_version
+
+        comp = render_queue_item.comp
+        comp_identifier = {
+            "name": comp.name,
+            "id": getattr(comp, 'id', None),
+            "output_location": os.path.dirname(render_scene_file_path)
+        }
+        # Write comp identifier JSON file next to the scene file using current scene file path
+        current_comp_file_path = self.adobe.app.project.file.fsName
+        # Place the comp identifier JSON in the same directory as the scene file with the name "_comp_identifiers.json"
+        comp_id_json_path =  os.path.join(os.path.dirname(current_comp_file_path), "_comp_identifiers.json")
+        with open(comp_id_json_path, "w") as f:
+            json.dump([comp_identifier], f, indent=4)
+
+        # Path to the JSX script
+        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                                       '../../jsx/generate_manifest_from_comps.jsx'))
+
+        # Convert the major version to the year-based version if necessary
+        major_version = str(self.ae_version).split(".")[0]
+        after_effects_version = _after_effects_version_to_year(major_version)
+
+
+        afterfx_path = r"C:\Program Files\Adobe\Adobe After Effects %s\Support Files\AfterFX.com" % after_effects_version
+        command = [
+            afterfx_path,
+            "-ro",
+            jsx_script_path
+        ]
+        try:
+            subprocess.run(command, check=True)
+        except Exception as e:
+            print(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
 
     def get_fonts_and_plugins_for_comp(self, comp, manifest_data=None):
         """
@@ -666,9 +727,9 @@ class AppDialog(QtGui.QWidget):
         if manifest_data is None:
             manifest_data = {
                 "fonts": set(),
-                "plugins_effects": {
-                    "Native": set(),
-                    "ThirdParty": set()
+                "effects": {
+                    "native_effects": set(),
+                    "third_party_effects": set()
                 },
                 "nested_comps": []
             }
@@ -682,8 +743,8 @@ class AppDialog(QtGui.QWidget):
         if comp_identifier in self._manifest_cache:
             cached = self._manifest_cache[comp_identifier]
             manifest_data["fonts"].update(cached["fonts"])
-            manifest_data["plugins_effects"]["Native"].update(cached["plugins_effects"]["Native"])
-            manifest_data["plugins_effects"]["ThirdParty"].update(cached["plugins_effects"]["ThirdParty"])
+            manifest_data["effects"]["native_effects"].update(cached["effects"]["native_effects"])
+            manifest_data["effects"]["third_party_effects"].update(cached["effects"]["third_party_effects"])
             for nc in cached.get("nested_comps", []):
                 if nc not in manifest_data["nested_comps"]:
                     manifest_data["nested_comps"].append(nc)
@@ -719,12 +780,12 @@ class AppDialog(QtGui.QWidget):
                         effect_name = getattr(effect, "name", None)
                         effect_match_name = getattr(effect, 'matchName', None)
 
-                        # Here we classify the effect as native or third party based on the match name
+                        # Here we classify the effect as native_effects or third party based on the match name
                         if effect_match_name.startswith("ADBE") or effect_match_name.startswith("CC"):
-                            manifest_data["plugins_effects"]["Native"].add((effect_name, effect_match_name))
+                            manifest_data["effects"]["native_effects"].add((effect_name, effect_match_name))
 
                         else:
-                            manifest_data["plugins_effects"]["ThirdParty"].add((effect_name, effect_match_name))
+                            manifest_data["effects"]["third_party_effects"].add((effect_name, effect_match_name))
 
                         logger.debug("Added effect to manifest: %s" % effect_name)
 
@@ -869,7 +930,12 @@ class AppDialog(QtGui.QWidget):
                 self.update_progress_bar(int(current_step / total_steps * 100))
                 try:
                     logger.debug("Generating manifest file for render queue item: %s" % render_queue_item.comp.name)
-                    self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+
+                    # Using the jsx method for manifest generation as it is significantly faster than the python method
+                    #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+
+                    # Generate through jsx
+                    self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
                     logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
 
                 except Exception as e:
@@ -1888,7 +1954,12 @@ class AppDialog(QtGui.QWidget):
             try:
                 self.update_progress_bar_format(f"Generating manifest for {compName}...", primary=False)
                 QtGui.QApplication.processEvents()
-                self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+                # Keeping the old method for now as a backup in case the new JSX method causes issues.
+                # The old method is slower but more robust for error catching and reporting
+                #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+
+                # Using the jsx method for manifest generation as it is significantly faster than the python method
+                self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
 
                 logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
                 secondary_step += 1
