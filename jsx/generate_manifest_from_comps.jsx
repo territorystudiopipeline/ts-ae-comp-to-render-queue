@@ -25,12 +25,24 @@ For each comp specified, the script generates a manifest JSON file named "<comp_
 ALl debugging alerts have been commented out for cleaner execution, but can be uncommented for troubleshooting if needed.
 */
 
+// DEBUG flag, set by environment variable 'JSX_DEBUG' if present
+var DEBUG = 0;
+try {
+    var envDebug = $.getenv ? $.getenv("JSX_DEBUG") : null;
+    if (envDebug === "1") {
+        DEBUG = 1;
+    }
+} catch (e) {
+    // If getenv is not available, default to 0
+    DEBUG = 0;
+}
+
 // Try to read comp identifiers from a JSON file in the project folder
 function getCompsToAnalyzeFromJson() {
     var compsList = null;
     var projectFile = app.project.file;
     if (!projectFile) {
-        // alert("Project file is not saved. Please save your project before running this script.");
+        if (DEBUG) alert("Project file is not saved. Please save your project before running this script.");
         return null;
     }
     var projectFolder = projectFile.parent;
@@ -38,12 +50,14 @@ function getCompsToAnalyzeFromJson() {
     var jsonFile = null;
     // List all files in projectFolder for debugging
     var allFiles = projectFolder.getFiles();
-    // var allNames = [];
-    // for (var j = 0; j < allFiles.length; j++) {
-    //     allNames.push(allFiles[j].fsName);
-    // }
-    // alert("Files in project folder (" + projectFolder.fsName + "):\n" + allNames.join("\n"));
-    // Search for _comp_identifiers.json manually
+    var allNames = [];
+    for (var j = 0; j < allFiles.length; j++) {
+        allNames.push(allFiles[j].fsName);
+     }
+     if (DEBUG) alert("Files in project folder (" + projectFolder.fsName + "):\n" + allNames.join("\n"));
+     if (DEBUG) alert("Files in parent folder (" + parentFolder.fsName + "):\n" + parentNames.join("\n"));
+
+     // Search for _comp_identifiers.json manually
     for (var j = 0; j < allFiles.length; j++) {
         var fileObj = allFiles[j];
         if (fileObj instanceof File && fileObj.name.match(/_comp_identifiers\.json$/i)) {
@@ -54,11 +68,11 @@ function getCompsToAnalyzeFromJson() {
     // If not found, try parent folder
     if (!jsonFile) {
         var parentFiles = parentFolder.getFiles();
-        // var parentNames = [];
-        // for (var k = 0; k < parentFiles.length; k++) {
-        //     parentNames.push(parentFiles[k].fsName);
-        // }
-        // alert("Files in parent folder (" + parentFolder.fsName + "):\n" + parentNames.join("\n"));
+        var parentNames = [];
+         for (var k = 0; k < parentFiles.length; k++) {
+             parentNames.push(parentFiles[k].fsName);
+         }
+         if (DEBUG) alert("Files in parent folder (" + parentFolder.fsName + "):\n" + parentNames.join("\n"));
         for (var k = 0; k < parentFiles.length; k++) {
             var fileObj = parentFiles[k];
             if (fileObj instanceof File && fileObj.name.match(/_comp_identifiers\.json$/i)) {
@@ -68,17 +82,17 @@ function getCompsToAnalyzeFromJson() {
         }
     }
     if (!jsonFile) {
-        // alert("_comp_identifiers.json not found in either project or parent folder.");
+        if (DEBUG) alert("_comp_identifiers.json not found in either project or parent folder.");
         return null;
-    } // else {
-        // alert("Found _comp_identifiers.json at: " + jsonFile.fsName);
-    // }
+    }  else {
+        if (DEBUG) alert("Found _comp_identifiers.json at: " + jsonFile.fsName);
+     }
     if (jsonFile.open("r")) {
         try {
             var jsonStr = jsonFile.read();
             compsList = JSON.parse(jsonStr);
         } catch (e) {
-            // alert("Failed to parse comp identifiers JSON: " + e);
+            if (DEBUG) alert("Failed to parse comp identifiers JSON: " + e);
         }
         jsonFile.close();
     }
@@ -240,11 +254,11 @@ function writeManifestFile(manifest, folderPath) {
 
 function main() {
     if (!app.project || !app.project.file) {
-        // alert("No project is open. Please open a project before running this script.");
+        if (DEBUG) alert("No project is open. Please open a project before running this script.");
         return;
     }
     if (!compsToAnalyze || !compsToAnalyze.length) {
-        // alert("No comps to analyze. Please check your _comp_identifiers.json file or input list.");
+        if (DEBUG) alert("No comps to analyze. Please check your _comp_identifiers.json file or input list.");
         return;
     }
     var manifestCache = {};
@@ -254,7 +268,7 @@ function main() {
         var comp = findCompByNameAndId(compInfo.name, compInfo.id);
         var outputFolderPath = compInfo.output_location;
         if (!outputFolderPath) {
-            // alert("No output_location specified for comp '" + compInfo.name + "'. Manifest will be saved to project folder.");
+            if (DEBUG) alert("No output_location specified for comp '" + compInfo.name + "'. Manifest will be saved to project folder.");
             outputFolderPath = app.project.file.parent.fsName;
         }
         // Use File/Folder to join paths for OS-agnostic separator

@@ -9,6 +9,8 @@
 # not expressly granted therein are reserved by Shotgun Software Inc.
 import shutil
 import subprocess
+import warnings
+import functools
 import sgtk
 import os
 import re
@@ -39,6 +41,18 @@ def show_dialog(app_instance):
     # to be carried out by toolkit.
     app_instance.engine.show_dialog("Add Selected Comps to Render Queue...", app_instance, AppDialog)
 
+def deprecated(reason=""):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            warnings.warn(
+                f"Call to deprecated function {func.__name__}. {reason}",
+                category=DeprecationWarning,
+                stacklevel=2
+            )
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 class AppDialog(QtGui.QWidget):
     """
@@ -604,6 +618,8 @@ class AppDialog(QtGui.QWidget):
         logger.debug("Total Time: %s" % (time.time() - self.start_time))
         logger.debug("Total Render Queue Items Updated: %s" % count)
 
+    @deprecated("This method is deprecated and will be removed in a future version. "
+                "Please use generate_manifest_file_for_queue_item_jsx instead.")
     def generate_manifest_file_for_queue_item(self, render_queue_item, render_scene_file_path):
         """
             Generate a manifest file (json) for the render queue item that records
@@ -709,8 +725,14 @@ class AppDialog(QtGui.QWidget):
         ]
         try:
             subprocess.run(command, check=True)
-        except Exception as e:
+        except subprocess.CalledProcessError as e:
+            # This means the AE process started, but then terminated with an error
+            print(f"JSX script failed to execute: {e}", file=sys.stderr)
+            print(f"{e.stderr}", file=sys.stderr)
+        except OSError as e:
+            # This means there was an issue starting the AE process, such as the executable not being found
             print(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
+            print(f"Command: {' '.join(command)}")
 
     def get_fonts_and_plugins_for_comp(self, comp, manifest_data=None):
         """
