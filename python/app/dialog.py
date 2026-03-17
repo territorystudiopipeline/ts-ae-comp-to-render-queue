@@ -734,6 +734,70 @@ class AppDialog(QtGui.QWidget):
             print(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
             print(f"Command: {' '.join(command)}")
 
+    def generate_project_manifest_file_jsx(self, render_queue_item, render_scene_file_path):
+        """
+               Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file for the entire project.
+               """
+
+        def _after_effects_version_to_year(major_version):
+            """
+                Converts the major version number of After Effects to the corresponding year-based version string.
+                 - For versions 24 and above, it converts to a year-based version (e.g., 24 to 2024).
+
+                Arguments:
+                    major_version (str): The major version number of After Effects as a string.
+                Returns:
+                    str: The year-based version string for After Effects if major version is 24 or above,
+                    otherwise returns the original major version string.
+            """
+            try:
+                major_version_int = int(major_version)
+                if major_version_int >= 24:
+                    return str(2000 + major_version_int)
+                else:
+                    return major_version
+            except ValueError:
+                logger.error(f"Unable to parse After Effects version: {self.ae_version}")
+                return major_version
+
+        comp = render_queue_item.comp
+        comp_identifier = {
+            "name": comp.name,
+            "id": getattr(comp, 'id', None),
+            "output_location": os.path.dirname(render_scene_file_path)
+        }
+        # Write comp identifier JSON file next to the scene file using current scene file path
+        current_comp_file_path = self.adobe.app.project.file.fsName
+        # Place the comp identifier JSON in the same directory as the scene file with the name "_comp_identifiers.json"
+        comp_id_json_path = os.path.join(os.path.dirname(current_comp_file_path), "_comp_identifiers.json")
+        with open(comp_id_json_path, "w") as f:
+            json.dump([comp_identifier], f, indent=4)
+
+        # Path to the JSX script
+        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                                       '../../jsx/generate_manifest_for_all_comps.jsx'))
+
+        # Convert the major version to the year-based version if necessary
+        major_version = str(self.ae_version).split(".")[0]
+        after_effects_version = _after_effects_version_to_year(major_version)
+
+        afterfx_path = r"C:\Program Files\Adobe\Adobe After Effects %s\Support Files\AfterFX.com" % after_effects_version
+        command = [
+            afterfx_path,
+            "-ro",
+            jsx_script_path
+        ]
+        try:
+            subprocess.run(command, check=True)
+        except subprocess.CalledProcessError as e:
+            # This means the AE process started, but then terminated with an error
+            print(f"JSX script failed to execute: {e}", file=sys.stderr)
+            print(f"{e.stderr}", file=sys.stderr)
+        except OSError as e:
+            # This means there was an issue starting the AE process, such as the executable not being found
+            print(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
+            print(f"Command: {' '.join(command)}")
+
     def get_fonts_and_plugins_for_comp(self, comp, manifest_data=None):
         """
             Collects fonts and plugins/effects used in the comp and nested comps.
@@ -959,6 +1023,10 @@ class AppDialog(QtGui.QWidget):
                     # Generate through jsx
                     self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
                     logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
+                    # Generate a project manifest file for all comps in the project through jsx
+                    self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                    logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
 
                 except Exception as e:
                     logger.error("Failed to generate manifest file: %s" % e)
@@ -1302,7 +1370,7 @@ class AppDialog(QtGui.QWidget):
                 The output location for the render queue item or render scene file path
         """
         template_file_name = os.path.basename(render_queue_template)
-
+        logger.debug("Using template file name: %s" % template_file_name)
         # Check if the template is a movie format or treat it as a sequence
         # Decide which template to use based on the use_comp_name and render_scene flags
         # This is easier to read and maintain than nested if statements
@@ -1322,6 +1390,7 @@ class AppDialog(QtGui.QWidget):
             }
 
         templateName = self._app.get_setting(template_map[(use_comp_name, render_scene)])
+        logger.debug("Using template: %s for use_comp_name: %s and render_scene: %s" % (templateName, use_comp_name, render_scene))
 
         template = self._app.engine.get_template_by_name(templateName)
 
@@ -2244,7 +2313,6 @@ class AppDialog(QtGui.QWidget):
         # Submit to Deadline
         args = [submit_info_path, plugin_info_path]
         results = self.call_deadline_command(args)
-
         logger.info("Deadline submission results: %s" % results)
 
     def apply_and_submit(self):
