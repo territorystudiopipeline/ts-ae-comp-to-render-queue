@@ -666,6 +666,22 @@ class Ui_Dialog(object):
         self.progressBar.setMinimumWidth(300)
         self.progressBar.hide()
 
+        # Secondary Progress Bar
+        self.secondaryProgressBar = QtGui.QProgressBar(Dialog)
+        self.secondaryProgressBar.setObjectName("secondaryProgressBar")
+        self.secondaryProgressBar.setValue(0)
+        self.secondaryProgressBar.setMaximum(100)
+        self.secondaryProgressBar.setMinimum(0)
+        self.secondaryProgressBar.setTextVisible(True)
+        self.secondaryProgressBar.setFormat("%p%")
+        self.secondaryProgressBar.setOrientation(QtCore.Qt.Horizontal)
+        self.secondaryProgressBar.setAlignment(QtCore.Qt.AlignCenter)
+        self.secondaryProgressBar.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
+        self.secondaryProgressBar.setMinimumHeight(20)
+        self.secondaryProgressBar.setMaximumHeight(20)
+        self.secondaryProgressBar.setMinimumWidth(300)
+        self.secondaryProgressBar.hide()
+
         # Create Actions
         self.jumpToCompAction = QtGui.QAction("Jump to Comp", self.compTableWidget)
         self.removeCompAction = QtGui.QAction("Remove Comp", self.compTableWidget)
@@ -1148,6 +1164,9 @@ class Ui_Dialog(object):
 
         # Add Progress Bar
         self.mainLayout.addWidget(self.progressBar)
+
+        # Add Secondary Progress Bar
+        self.mainLayout.addWidget(self.secondaryProgressBar)
 
         # Buttons
         self.buttonsLayout = QtGui.QHBoxLayout()

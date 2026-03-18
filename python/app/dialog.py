@@ -9,10 +9,14 @@
 # not expressly granted therein are reserved by Shotgun Software Inc.
 import shutil
 import subprocess
+import warnings
+import functools
 import sgtk
 import os
 import re
 import time
+import json
+import sys
 from contextlib import contextmanager
 import traceback
 
@@ -37,6 +41,18 @@ def show_dialog(app_instance):
     # to be carried out by toolkit.
     app_instance.engine.show_dialog("Add Selected Comps to Render Queue...", app_instance, AppDialog)
 
+def deprecated(reason=""):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            warnings.warn(
+                f"Call to deprecated function {func.__name__}. {reason}",
+                category=DeprecationWarning,
+                stacklevel=2
+            )
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
 
 class AppDialog(QtGui.QWidget):
     """
@@ -63,6 +79,7 @@ class AppDialog(QtGui.QWidget):
         self._app = sgtk.platform.current_bundle()
         self.adobe = self._app.engine.adobe
 
+        self.ae_version = self.adobe.app.version
         self.current_project = self._app.context.project
         self.project_id = self.current_project["id"]
         self.project_name = self.current_project["name"]
@@ -70,6 +87,7 @@ class AppDialog(QtGui.QWidget):
 
         logger.debug(f"Current Project: {self.current_project}")
         logger.debug(f"Project ID: {self.project_id}")
+        logger.debug(f"AE Version: {self.ae_version}")
 
         # logging happens via a standard toolkit logger
         logger.info("Launching Add to render Queue Application...")
@@ -83,6 +101,8 @@ class AppDialog(QtGui.QWidget):
         self.first_frame = self._app.get_setting('default_first_frame')
         self.last_frame = self._app.get_setting('default_last_frame')
         self.deadline_defaults = self._app.get_setting('deadline_defaults')
+        self.deadline_host = self._app.get_setting('deadline_host')
+        self.deadline_port = self._app.get_setting('deadline_port')
         self.render_preset_movie_formats = self._app.get_setting('render_preset_movie_formats')
 
         # Deadline variables
@@ -101,6 +121,9 @@ class AppDialog(QtGui.QWidget):
 
         # Set the window size
         self.resize(1000, self.ui.compTableWidget.sizeHint().height())
+
+        # Manifest cache to avoid redundant analysis of comps
+        self._manifest_cache = {}
 
     def populate_sg_fields(self):
         """
@@ -597,6 +620,315 @@ class AppDialog(QtGui.QWidget):
         logger.debug("Total Time: %s" % (time.time() - self.start_time))
         logger.debug("Total Render Queue Items Updated: %s" % count)
 
+    @deprecated("This method is deprecated and will be removed in a future version. "
+                "Please use generate_manifest_file_for_queue_item_jsx instead.")
+    def generate_manifest_file_for_queue_item(self, render_queue_item, render_scene_file_path):
+        """
+            Generate a manifest file (json) for the render queue item that records
+            fonts and plugins/effects used in the render comp.
+
+            If there are nested comps, the manifest will also include the fonts and plugins/effects used in those nested comps.
+
+            Arguments:
+                render_queue_item: The render queue item to generate the manifest for
+                render_scene_file_path: The path to the render scene file to be rendered
+        """
+
+        comp = render_queue_item.comp
+
+        comp_identifier = (comp.name, getattr(comp, 'id', None))
+        if comp_identifier in self._manifest_cache:
+            manifest_data = self._manifest_cache[comp_identifier].copy()
+        else:
+            manifest_data = {
+                "scene_name": self.adobe.app.project.file.name,
+                "scene_file": render_scene_file_path,
+                "comp_name": comp.name,
+                "comp_id": getattr(comp, 'id', None),
+                "comp_frame_rate": comp.frameRate,
+                "comp_duration": comp.duration,
+                "nested_comps": [],
+                "fonts": set(),
+                "effects": {
+                    "native_effects": set(),
+                    "third_party_effects": set()
+                }
+            }
+            manifest_data = self.get_fonts_and_plugins_for_comp(comp, manifest_data)
+            self._manifest_cache[comp_identifier] = manifest_data.copy()
+
+        # Convert the sets to lists for json serialization
+        manifest_data["fonts"] = [
+            {"name": f[0], "family": f[1], "style": f[2]} for f in manifest_data["fonts"]
+        ]
+        manifest_data["effects"] = {
+            "native_effects": [{"name": n[0], "matchName": n[1]} for n in manifest_data["effects"]["native_effects"]],
+            "third_party_effects": [{"name": t[0], "matchName": t[1]} for t in manifest_data["effects"]["third_party_effects"]]
+        }
+
+        # Save the manifest data to a json file in the same location as the render scene file
+        manifest_file_path = os.path.splitext(render_scene_file_path)[0] + "_manifest.json"
+
+        with open(manifest_file_path, "w") as manifest_file:
+            json.dump(manifest_data, manifest_file, indent=4)
+
+    def generate_manifest_file_for_queue_item_jsx(self, render_queue_item, render_scene_file_path):
+        """
+        Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file.
+        """
+        def _after_effects_version_to_year(major_version):
+            """
+                Converts the major version number of After Effects to the corresponding year-based version string.
+                 - For versions 24 and above, it converts to a year-based version (e.g., 24 to 2024).
+
+                Arguments:
+                    major_version (str): The major version number of After Effects as a string.
+                Returns:
+                    str: The year-based version string for After Effects if major version is 24 or above,
+                    otherwise returns the original major version string.
+            """
+            try:
+                major_version_int = int(major_version)
+                if major_version_int >= 24:
+                    return str(2000 + major_version_int)
+                else:
+                    return major_version
+            except ValueError:
+                logger.error(f"Unable to parse After Effects version: {self.ae_version}")
+                return major_version
+
+        comp = render_queue_item.comp
+        comp_identifier = {
+            "name": comp.name,
+            "id": getattr(comp, 'id', None),
+            "output_location": os.path.dirname(render_scene_file_path)
+        }
+        # Write comp identifier JSON file next to the scene file using current scene file path
+        current_comp_file_path = self.adobe.app.project.file.fsName
+        # Place the comp identifier JSON in the same directory as the scene file with the name "_comp_identifiers.json"
+        comp_id_json_path =  os.path.join(os.path.dirname(current_comp_file_path), "_comp_identifiers.json")
+        with open(comp_id_json_path, "w") as f:
+            json.dump([comp_identifier], f, indent=4)
+
+        # Path to the JSX script
+        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                                       '../../jsx/generate_manifest_from_comps.jsx'))
+
+        # Convert the major version to the year-based version if necessary
+        major_version = str(self.ae_version).split(".")[0]
+        after_effects_version = _after_effects_version_to_year(major_version)
+
+
+        afterfx_path = r"C:\Program Files\Adobe\Adobe After Effects %s\Support Files\AfterFX.com" % after_effects_version
+        command = [
+            afterfx_path,
+            "-ro",
+            jsx_script_path
+        ]
+        try:
+            subprocess.run(command, check=True)
+        except subprocess.CalledProcessError as e:
+            # This means the AE process started, but then terminated with an error
+            print(f"JSX script failed to execute: {e}", file=sys.stderr)
+            print(f"{e.stderr}", file=sys.stderr)
+        except OSError as e:
+            # This means there was an issue starting the AE process, such as the executable not being found
+            print(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
+            print(f"Command: {' '.join(command)}")
+
+    def generate_project_manifest_file_jsx(self, render_queue_item, render_scene_file_path):
+        """
+               Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file for the entire project.
+               """
+
+        def _after_effects_version_to_year(major_version):
+            """
+                Converts the major version number of After Effects to the corresponding year-based version string.
+                 - For versions 24 and above, it converts to a year-based version (e.g., 24 to 2024).
+
+                Arguments:
+                    major_version (str): The major version number of After Effects as a string.
+                Returns:
+                    str: The year-based version string for After Effects if major version is 24 or above,
+                    otherwise returns the original major version string.
+            """
+            try:
+                major_version_int = int(major_version)
+                if major_version_int >= 24:
+                    return str(2000 + major_version_int)
+                else:
+                    return major_version
+            except ValueError:
+                logger.error(f"Unable to parse After Effects version: {self.ae_version}")
+                return major_version
+
+        comp = render_queue_item.comp
+        comp_identifier = {
+            "name": comp.name,
+            "id": getattr(comp, 'id', None),
+            "output_location": os.path.dirname(render_scene_file_path)
+        }
+        # Write comp identifier JSON file next to the scene file using current scene file path
+        current_comp_file_path = self.adobe.app.project.file.fsName
+        # Place the comp identifier JSON in the same directory as the scene file with the name "_comp_identifiers.json"
+        comp_id_json_path = os.path.join(os.path.dirname(current_comp_file_path), "_comp_identifiers.json")
+        with open(comp_id_json_path, "w") as f:
+            json.dump([comp_identifier], f, indent=4)
+
+        # Path to the JSX script
+        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
+                                                       '../../jsx/generate_manifest_for_all_comps.jsx'))
+
+        # Convert the major version to the year-based version if necessary
+        major_version = str(self.ae_version).split(".")[0]
+        after_effects_version = _after_effects_version_to_year(major_version)
+
+        afterfx_path = r"C:\Program Files\Adobe\Adobe After Effects %s\Support Files\AfterFX.com" % after_effects_version
+        command = [
+            afterfx_path,
+            "-ro",
+            jsx_script_path
+        ]
+        try:
+            subprocess.run(command, check=True)
+        except subprocess.CalledProcessError as e:
+            # This means the AE process started, but then terminated with an error
+            print(f"JSX script failed to execute: {e}", file=sys.stderr)
+            print(f"{e.stderr}", file=sys.stderr)
+        except OSError as e:
+            # This means there was an issue starting the AE process, such as the executable not being found
+            print(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
+            print(f"Command: {' '.join(command)}")
+
+    def get_fonts_and_plugins_for_comp(self, comp, manifest_data=None):
+        """
+            Collects fonts and plugins/effects used in the comp and nested comps.
+
+            Args:
+                comp: The comp to get the fonts and plugins/effects for.
+                manifest_data: The manifest data to add the fonts and plugins/effects to. If None, initializes a new dict.
+                visited_comps: Set of comp identifiers already processed to avoid redundant recursion.
+
+            Returns:
+                dict: The manifest data with the fonts and plugins/effects added.
+        """
+        if manifest_data is None:
+            manifest_data = {
+                "fonts": set(),
+                "effects": {
+                    "native_effects": set(),
+                    "third_party_effects": set()
+                },
+                "nested_comps": []
+            }
+
+        if "nested_comps" not in manifest_data:
+            manifest_data["nested_comps"] = []
+
+        # Use comp name and id as a unique identifier for the comp to prevent redundant processing
+        comp_identifier = (comp.name, getattr(comp, 'id', None))
+        # Use cache to prevent redundant analysis and recursion
+        if comp_identifier in self._manifest_cache:
+            cached = self._manifest_cache[comp_identifier]
+            manifest_data["fonts"].update(cached["fonts"])
+            manifest_data["effects"]["native_effects"].update(cached["effects"]["native_effects"])
+            manifest_data["effects"]["third_party_effects"].update(cached["effects"]["third_party_effects"])
+            for nc in cached.get("nested_comps", []):
+                if nc not in manifest_data["nested_comps"]:
+                    manifest_data["nested_comps"].append(nc)
+            return manifest_data
+
+        # Only add to nested_comps if not the root comp and not already present
+        if manifest_data.get("comp_name") != comp.name:
+            if comp_identifier not in [(c["comp_name"], c["comp_id"]) for c in manifest_data["nested_comps"]]:
+                manifest_data["nested_comps"].append({
+                    "comp_name": comp.name,
+                    "comp_id": getattr(comp, 'id', None)
+                })
+
+        def collect_effects_on_layer(layer, manifest_data):
+            """
+                Collects the plugins/effects used on a layer and adds them to the manifest data
+
+                Arguments:
+                    layer: The layer to collect the plugins/effects from
+                    manifest_data: The manifest data to add the plugins/effects to
+            """
+            effects = []
+            num_of_properties = layer.numProperties
+            for p in range(1, num_of_properties + 1):
+                property = layer.property(p)
+
+                if property and property.matchName == "ADBE Effect Parade":
+                    num_of_effects = property.numProperties
+                    logger.debug("Number of effects on layer: %s" % num_of_effects)
+
+                    for e in range(1, num_of_effects + 1):
+                        effect = property.property(e)
+                        effect_name = getattr(effect, "name", None)
+                        effect_match_name = getattr(effect, 'matchName', None)
+
+                        # Here we classify the effect as native_effects or third party based on the match name
+                        if effect_match_name.startswith("ADBE") or effect_match_name.startswith("CC"):
+                            manifest_data["effects"]["native_effects"].add((effect_name, effect_match_name))
+
+                        else:
+                            manifest_data["effects"]["third_party_effects"].add((effect_name, effect_match_name))
+
+                        logger.debug("Added effect to manifest: %s" % effect_name)
+
+        num_of_layers = comp.numLayers
+        logger.debug("Getting fonts and plugins/effects for comp: %s, Number of layers: %s" % (comp.name, num_of_layers))
+        self.show_progress_bar(format_text="Processing layers for comp %s..." % (comp.name), primary=False, max=num_of_layers)
+
+        for i, layer in enumerate(self._app.engine.iter_collection(comp.layers), start=1):
+            self.update_progress_bar(int(i), primary=False)
+            logger.debug("Checking layer %s of %s" % (i, num_of_layers))
+
+            logger.debug("Layer: %s" % layer)
+            layer_source = layer.source
+            logger.debug("Source: %s" % layer_source)
+
+            if self._app.engine.is_item_of_type(layer_source, "CompItem"):
+                nested_comp = layer_source
+                logger.debug("Found nested comp: %s" % nested_comp.name)
+                collect_effects_on_layer(layer, manifest_data)
+                self.get_fonts_and_plugins_for_comp(nested_comp, manifest_data)
+
+            elif self._app.engine.is_item_of_type(layer, "TextLayer"):
+                logger.debug("Found text layer: %s" % layer.name)
+                text_source = layer.property("Source Text")
+                num_keys = text_source.numKeys
+
+                if num_keys > 0:
+                    logger.debug("Text source is animated, number of keyframes: %s" % num_keys)
+
+                    for key_index in range(1, num_keys + 1):
+                        text_document = text_source.keyValue(key_index)
+                        font = text_document.font
+                        font_family = getattr(text_document, 'fontFamily', None)
+                        font_style = getattr(text_document, 'fontStyle', None)
+                        logger.debug("Added font from keyframe %s: %s, %s, %s" % (key_index, font, font_family, font_style))
+                        manifest_data["fonts"].add((font, font_family, font_style))
+                else:
+                    logger.debug("Text source is not animated, getting font from static value")
+                    text_document = text_source.value
+                    font = text_document.font
+                    font_family = getattr(text_document, 'fontFamily', None)
+                    font_style = getattr(text_document, 'fontStyle', None)
+                    logger.debug("Added font: %s, %s, %s" % (font, font_family, font_style))
+                    manifest_data["fonts"].add((font, font_family, font_style))
+                collect_effects_on_layer(layer, manifest_data)
+
+            else:
+                collect_effects_on_layer(layer, manifest_data)
+
+        self.hide_progress_bar(primary=False)
+
+        # After analysis, cache the result
+        self._manifest_cache[comp_identifier] = manifest_data.copy()
+        return manifest_data
+
     def process_queue_items_for_render(self):
         """
             Process the render queue items for rendering locally
@@ -638,33 +970,29 @@ class AppDialog(QtGui.QWidget):
         else:
             return False
 
-        # Show the progress bar
-        self.show_progress_bar(format_text="Updating render queue items status's...")
+        num_items = self.ui.compTableWidget.rowCount()
+        steps_per_item = 2  # manifest + copy
+        total_steps = num_items * steps_per_item
+        current_step = 0
 
-        # Get the render queue items from the table
+        self.show_progress_bar(format_text="Processing render queue items...")
+
         count = 0
-        for row in range(self.ui.compTableWidget.rowCount()):
+        for row in range(num_items):
             tableItem = self.ui.compTableWidget.item(row, 0)
             statusItem = self.ui.compTableWidget.item(row, 1)
             renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
             useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
 
-            # Emit progress
-            self.update_progress_bar(int(row / self.ui.compTableWidget.rowCount() * 100))
+            render_queue_item = tableItem.data(QtCore.Qt.UserRole)
+            comp = render_queue_item.comp
+            compName = comp.name
 
-            # Check if the item is checked
-            if includeCheckBox.checkState() == QtCore.Qt.Checked:
-                render_queue_item = tableItem.data(QtCore.Qt.UserRole)
-                comp = render_queue_item.comp
-                compName = comp.name
+            if includeCheckBox.checkState() == QtCore.Qt.Checked and render_queue_item.status != self.adobe.RQItemStatus.NEEDS_OUTPUT:
                 render_queue_template = self.get_render_queue_template(row)
                 frame_range = self.get_frame_range(comp, row)
-
-                if useCompNameCheckBox.checkState() == QtCore.Qt.Checked:
-                    use_comp_name = True
-                else:
-                    use_comp_name = False
+                use_comp_name = useCompNameCheckBox.checkState() == QtCore.Qt.Checked
 
                 logger.debug("Use Comp Name: %s" % use_comp_name)
 
@@ -684,7 +1012,43 @@ class AppDialog(QtGui.QWidget):
                 logger.debug("Render Scene File Directory: %s" % render_scene_file_directory)
                 logger.debug("Comp Name: %s" % comp.name)
 
-                # Creates a copy of the project file for the render scene
+                # Manifest generation step
+                current_step += 1
+                self.update_progress_bar_format(f"Generating manifest for {compName}...")
+                self.update_progress_bar(int(current_step / total_steps * 100))
+                try:
+                    logger.debug("Generating manifest file for render queue item: %s" % render_queue_item.comp.name)
+
+                    # Using the jsx method for manifest generation as it is significantly faster than the python method
+                    #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+
+                    # Generate through jsx
+                    self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
+                    logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
+                    # Generate a project manifest file for all comps in the project through jsx
+                    self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                    logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
+                except Exception as e:
+                    logger.error("Failed to generate manifest file: %s" % e)
+                    error = traceback.format_exc()
+                    logger.error("%s" % error)
+                    self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
+
+                    # Update the status icon
+                    statusItem.setIcon(self.ui.errorIcon)
+                    statusItem.setToolTip("Error - Failed to generate manifest file")
+                    includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+
+                    continue
+
+                self.update_progress_bar(int(current_step / total_steps * 100))
+
+                # Project file copy step
+                current_step += 1
+                self.update_progress_bar_format(f"Copying project file for {compName}...")
+                self.update_progress_bar(int(current_step / total_steps * 100))
                 try:
                     logger.debug("Copying project file to render scene location: %s" % render_scene_file_path)
                     shutil.copy(self.adobe.app.project.file.fsName, render_scene_file_path)
@@ -703,6 +1067,8 @@ class AppDialog(QtGui.QWidget):
                     includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
                     continue
 
+                self.update_progress_bar(int(current_step / total_steps * 100))
+
                 # Log
                 logger.debug("Render Queue Item for: %s has been processed" % render_queue_item.comp.name)
                 count += 1
@@ -714,17 +1080,21 @@ class AppDialog(QtGui.QWidget):
 
             else:
                 # Change the render queue item status to UNQUEUED if unchecked
-                render_queue_item = tableItem.data(QtCore.Qt.UserRole)
                 render_queue_item.render = False # Set to unqueued
                 logger.debug("Render Queue Item for: %s has been set to UNQUEUED" % render_queue_item.comp.name)
 
                 # Update the status icon
                 statusItem = self.ui.compTableWidget.item(row, 1)
                 statusItem.setIcon(self.ui.warningIcon)
-                statusItem.setToolTip("UNQUEUED - Not Included in Render Queue")
+
+                if render_queue_item.status == self.adobe.RQItemStatus.NEEDS_OUTPUT:
+                    statusItem.setToolTip("NEEDS OUTPUT - Template Not Applied | Needs Output")
+                else:
+                    statusItem.setToolTip("UNQUEUED - Not Included in Render Queue")
 
         # Show progress at 100%
         self.update_progress_bar(100)
+        self.update_progress_bar_format("Finished processing render queue items")
         time.sleep(0.2)
         self.hide_progress_bar()
 
@@ -900,8 +1270,6 @@ class AppDialog(QtGui.QWidget):
         logger.debug("Starting render of current render queue items")
         self.adobe.app.project.renderQueue.renderAsync()
 
-        self.close()
-
     def run_project_checks(self):
         """
             Runs basic project checks
@@ -1004,7 +1372,7 @@ class AppDialog(QtGui.QWidget):
                 The output location for the render queue item or render scene file path
         """
         template_file_name = os.path.basename(render_queue_template)
-
+        logger.debug("Using template file name: %s" % template_file_name)
         # Check if the template is a movie format or treat it as a sequence
         # Decide which template to use based on the use_comp_name and render_scene flags
         # This is easier to read and maintain than nested if statements
@@ -1024,6 +1392,7 @@ class AppDialog(QtGui.QWidget):
             }
 
         templateName = self._app.get_setting(template_map[(use_comp_name, render_scene)])
+        logger.debug("Using template: %s for use_comp_name: %s and render_scene: %s" % (templateName, use_comp_name, render_scene))
 
         template = self._app.engine.get_template_by_name(templateName)
 
@@ -1326,35 +1695,64 @@ class AppDialog(QtGui.QWidget):
     # Progress Bar
     #####################################################################################################
 
-    def show_progress_bar(self, format_text=None):
+    def show_progress_bar(self, format_text=None, max=100,primary=True):
         """
             Show the progress bar
 
             Arguments:
                 format_text: The text to display on the progress bar
+                primary: Whether to show the primary progress bar or the secondary progress bar
 
             Returns: None
         """
-        self.ui.progressBar.setVisible(True)
-        self.ui.progressBar.setValue(0)
-        if format_text:
-            self.ui.progressBar.setFormat(f"{format_text} %p%")
+        if primary:
+            self.ui.progressBar.setVisible(True)
+            self.ui.progressBar.setMaximum(max)
+            self.ui.progressBar.setValue(0)
+            if format_text:
+                self.ui.progressBar.setFormat(f"{format_text} %p%")
+        else:
+            self.ui.secondaryProgressBar.setVisible(True)
+            self.ui.secondaryProgressBar.setMaximum(max)
+            self.ui.secondaryProgressBar.setValue(0)
+            if format_text:
+                self.ui.secondaryProgressBar.setFormat(f"{format_text} %p%")
 
-    def hide_progress_bar(self):
+    def hide_progress_bar(self, primary=True):
         """
             Hide the progress bar
         """
-        self.ui.progressBar.setVisible(False)
-        self.ui.progressBar.setValue(0)
-        self.ui.progressBar.setFormat("%p%")
+        if primary:
+            self.ui.progressBar.setVisible(False)
+            self.ui.progressBar.setValue(0)
+            self.ui.progressBar.setFormat("%p%")
+        else:
+            self.ui.secondaryProgressBar.setVisible(False)
+            self.ui.secondaryProgressBar.setValue(0)
+            self.ui.secondaryProgressBar.setFormat("%p%")
 
-    def update_progress_bar(self, value):
+
+    def update_progress_bar(self, value, primary=True):
         """
             Update the progress bar
             Arguments:
                 value: The value to set the progress bar to
         """
-        self.ui.progressBar.setValue(value)
+        if primary:
+            self.ui.progressBar.setValue(value)
+        else:
+            self.ui.secondaryProgressBar.setValue(value)
+
+    def update_progress_bar_format(self, format_text, primary=True):
+        """
+            Update the progress bar format
+            Arguments:
+                format_text: The text to display on the progress bar
+        """
+        if primary:
+            self.ui.progressBar.setFormat(f"{format_text} %p%")
+        else:
+            self.ui.secondaryProgressBar.setFormat(f"{format_text} %p%")
 
     ######################################################################################################
     # Deadline
@@ -1532,7 +1930,7 @@ class AppDialog(QtGui.QWidget):
             self.toggle_buttons()
             return
 
-        # If there are rows in the table
+        # If there are no rows in the table
         if self.ui.compTableWidget.rowCount() == 0:
             self.warning_box("No render queue items available", "Please add some render queue items or refresh the table to submit to Deadline")
             return
@@ -1555,12 +1953,13 @@ class AppDialog(QtGui.QWidget):
 
         self.show_progress_bar(format_text="Submitting to Deadline")
 
-        # Submit the selected rows to Deadline
-        for row in range(self.ui.compTableWidget.rowCount()):
-
-            # Emit progress
-            self.update_progress_bar(int(row / self.ui.compTableWidget.rowCount() * 100))
-
+        # Loop through the render queue items in the table and submit them to Deadline if they are checked
+        # and queued in the render queue
+        num_rows = self.ui.compTableWidget.rowCount()
+        for row in range(num_rows):
+            # Emit overall progress
+            self.update_progress_bar(int(row / num_rows * 100))
+            QtGui.QApplication.processEvents()
             render_queue_item = self.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
             statusItem = self.ui.compTableWidget.item(row, 1)
@@ -1613,19 +2012,23 @@ class AppDialog(QtGui.QWidget):
             # Create the output folder if it doesn't already exist
             render_scene_file_directory = os.path.dirname(render_scene_file_path)
 
-            if not os.path.exists(render_scene_file_directory):
-                os.makedirs(render_scene_file_directory)
-
-            # Debugging
-            logger.debug("Render Scene File: %s" % render_scene_file_path)
-            logger.debug("Render Scene File Directory: %s" % render_scene_file_directory)
-            logger.debug("Comp Name: %s" % render_queue_item.comp.name)
-
-            # Copy the current project file to the render scene file path
+            # --- Secondary progress bar for per-row steps ---
+            self.show_progress_bar(format_text=f"Processing {compName}...", max=3, primary=False)
+            secondary_step = 0
+            # Step 1: Copy project file
             try:
-                logger.debug("Copying project file to render scene location: %s" % render_scene_file_path)
+                self.update_progress_bar_format(f"Copying project file for {compName}...", primary=False)
+                QtGui.QApplication.processEvents()
+
+                if not os.path.exists(render_scene_file_directory):
+                    os.makedirs(render_scene_file_directory, exist_ok=True)
+
                 shutil.copy(self.adobe.app.project.file.fsName, render_scene_file_path)
                 logger.info('Copy created: %s' % render_scene_file_path)
+
+                secondary_step += 1
+                self.update_progress_bar(secondary_step, primary=False)
+                QtGui.QApplication.processEvents()
 
             except Exception as e:
                 logger.error("Failed to create render scene backup: %s" % e)
@@ -1637,18 +2040,58 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.errorIcon)
                 statusItem.setToolTip("Error - Failed to create render scene backup")
                 includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                self.hide_progress_bar(primary=False)
                 continue
 
+            # Step 2: Generate manifest
             try:
-                # Submit the render queue item to Deadline
-                logger.debug("Submitting render queue item: %s" % render_queue_item.comp.name)
-                self.submit_render_queue_item_to_deadline(render_queue_item=render_queue_item,
-                                                          deadline_settings=current_deadline_settings,
-                                                          project_path=project_path,
-                                                          layers=False,
-                                                          previous_job_id=previous_job_id,
-                                                          version=version,
-                                                          render_file=render_scene_file_path)
+                self.update_progress_bar_format(f"Generating manifest for {compName}...", primary=False)
+                QtGui.QApplication.processEvents()
+                # Keeping the old method for now as a backup in case the new JSX method causes issues.
+                # The old method is slower but more robust for error catching and reporting
+                #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+
+                # Using the jsx method for manifest generation as it is significantly faster than the python method
+                self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
+                logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
+                # TODO: This will currently run more than once when it shouldn't, need to come refactor this for multi comp submissions
+                # Generate a project manifest file for all comps in the project through jsx
+                self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
+
+                secondary_step += 1
+                self.update_progress_bar(secondary_step, primary=False)
+                QtGui.QApplication.processEvents()
+
+            except Exception as e:
+                logger.error("Failed to generate manifest file: %s" % e)
+                error = traceback.format_exc()
+                logger.error("%s" % error)
+                self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
+
+                # Update the status icon
+                statusItem.setIcon(self.ui.errorIcon)
+                statusItem.setToolTip("Error - Failed to generate manifest file")
+                includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                self.hide_progress_bar(primary=False)
+                continue
+
+            # Step 3: Submit to Deadline
+            try:
+                self.update_progress_bar_format(f"Submitting {compName} to Deadline...", primary=False)
+                QtGui.QApplication.processEvents()
+                job_attrs, plugin_attrs = self.build_deadline_job_and_plugin_dicts(
+                    render_queue_item=render_queue_item,
+                    deadline_settings=current_deadline_settings,
+                    project_path=project_path,
+                    layers=False,
+                    previous_job_id=previous_job_id,
+                    version=version,
+                    render_file=render_scene_file_path
+                )
+                self.submit_render_queue_item_to_deadline_deadlineconnect(job_attrs, plugin_attrs)
 
                 logger.debug("Render queue item submitted to Deadline: %s" % render_queue_item.comp.name)
 
@@ -1657,6 +2100,9 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.submitIcon)
                 statusItem.setToolTip("Submitted to Deadline")
                 num_successful_submissions += 1
+                secondary_step += 1
+                self.update_progress_bar(secondary_step, primary=False)
+                QtGui.QApplication.processEvents()
 
             except Exception as e:
                 logger.error("Failed to submit render queue item to Deadline: %s" % e)
@@ -1667,9 +2113,13 @@ class AppDialog(QtGui.QWidget):
                 # Update Status
                 statusItem.setIcon(self.ui.errorIcon)
                 statusItem.setToolTip("Failed to submit to Deadline - %s" % e)
+                self.hide_progress_bar(primary=False)
+                continue
 
-        # Show progress at 100%
+            self.hide_progress_bar(primary=False)
+        self.hide_progress_bar(primary=False)
         self.update_progress_bar(100)
+        self.update_progress_bar_format("Finished submitting to Deadline")
         time.sleep(0.2)
         self.hide_progress_bar()
 
@@ -1682,47 +2132,26 @@ class AppDialog(QtGui.QWidget):
         else:
             self.message_box("Deadline Submission", "Submission completed successfully.\n\n%d jobs submitted to Deadline." % num_successful_submissions)
 
-    def submit_render_queue_item_to_deadline(self,
-                                             render_queue_item,
-                                             deadline_settings,
-                                             project_path,
-                                             layers,
-                                             previous_job_id,
-                                             version,
-                                             render_file):
-        """
-            Submit the render queue item to Deadline
 
-            Layer submission is not supported yet, so this is a placeholder for now
-            Iv removed some of the checks and statements that were inplace for older after effects versions
-            I have also kept the code and structure as close to the original submitter as possible for now
+    def build_deadline_job_and_plugin_dicts(self, render_queue_item, deadline_settings, project_path, layers, previous_job_id, version, render_file):
+        """
+        Builds the required job_attrs and plugin_attrs dictionaries for submitting a job to DeadlineConnect based on the provided render queue item and settings.
 
             Arguments:
-                render_queue_item: The render queue item to submit
-                deadline_settings: The deadline settings to use for submission
-                project_path: The path to the project file
-                layers: Whether to submit layers (not supported yet)
-                previous_job_id: The job ID of the previous job (for dependencies)
-                version: The version of After Effects
-                render_file: The path to the render scene file
+                render_queue_item (RenderQueueItem): The render queue item to submit job for.
+                deadline_settings (dict): The current Deadline settings from the UI.
+                project_path (str): The file path of the current After Effects project.
+                layers (bool): Whether to include layer information in the plugin attributes.
+                previous_job_id (str): The job ID of the previously submitted job to set as a dependency, if any.
+                version (str): The version of After Effects being used.
+                render_file (str): The file path of the render scene to submit.
 
-            Returns:
-                None
+        Returns (job_attrs, plugin_attrs) for DeadlineConnect submission.
         """
-        logger.debug("Submitting render queue item to Deadline: %s" % render_queue_item.comp.name)
-
         # Output Variables
         output_module = render_queue_item.outputModule(render_queue_item.numOutputModules)
         output_file_name = output_module.file.name
         output_folder = os.path.dirname(output_file_name)
-
-        # Paths
-        temp_folder = os.path.expanduser("~\\temp\\")
-        os.makedirs(temp_folder, exist_ok=True)
-        submit_info_path = os.path.join(temp_folder, "ae_submit_info.job")
-        plugin_info_path = os.path.join(temp_folder, "ae_plugin_info.job")
-
-        # Submission variables
         ae_project_name = os.path.basename(self.adobe.app.project.file.name)
         job_name = f"{self.project_name} - {ae_project_name} - {render_queue_item.comp.name}"
         start_frame = ""
@@ -1735,8 +2164,6 @@ class AppDialog(QtGui.QWidget):
         comp_name = render_queue_item.comp.name
         dependent_job_id = previous_job_id or ""
         dependent_comps = False
-
-        # Check if the output module is rendering a movie
         is_movie = any(output_file_name.endswith(ext) for ext in self.deadline_defaults["movie_formats"])
 
         if override_frame_list or multi_machine:
@@ -1754,7 +2181,7 @@ class AppDialog(QtGui.QWidget):
                 frame_list = f"{start_frame},{end_frame},{frame_list}"
 
         current_job_dependencies = deadline_settings.get('job_dependencies', "")
-        if dependent_comps and dependent_job_id is not "":
+        if dependent_comps and dependent_job_id != "":
             if current_job_dependencies == "":
                 current_job_dependencies = dependent_job_id
             else:
@@ -1763,119 +2190,116 @@ class AppDialog(QtGui.QWidget):
         if multi_machine:
             job_name = f"{job_name} (multi-machine rendering {frame_list})"
 
-        # Create submission info file
-        with open(submit_info_path, "w") as submit_info:
-            submit_info.write(f"Plugin=AfterEffects\n")
-            submit_info.write(f"Name={job_name}\n")
-            if dependent_comps:
-                submit_info.write(f"BatchName={self.project_name} - {ae_project_name}\n")
-            submit_info.write(f"Comment={deadline_settings.get('comment', '')}\n")
-            submit_info.write(f"Department={deadline_settings.get('department', self.project_name or '')}\n")
-            submit_info.write(f"Group={deadline_settings.get('group', 'ae')}\n")
-            submit_info.write(f"Pool={deadline_settings.get('pool', 'none')}\n")
-            submit_info.write(f"SecondaryPool={deadline_settings.get('secondary_pool', 'none')}\n")
-            submit_info.write(f"Priority={deadline_settings.get('priority', 30)}\n")
-            submit_info.write(f"TaskTimeoutMinutes={deadline_settings.get('task_timeout_minutes', '0')}\n")
-            submit_info.write(f"LimitGroups={deadline_settings.get('limit_groups', '')}\n")
-            submit_info.write(f"ConcurrentTasks={deadline_settings.get('concurrent_tasks', '1')}\n")
-            submit_info.write(f"LimitConcurrentTasksToNumberOfCpus={deadline_settings.get('limit_concurrent_tasks_to_number_cpus', '0')}\n")
-            submit_info.write(f"JobDependencies={current_job_dependencies}\n")
-            submit_info.write(f"OnJobComplete={deadline_settings.get('on_job_complete', 'Nothing')}\n")
-            submit_info.write(f"FailureDetectionTaskErrors={deadline_settings.get('failure_detection_task_errors', 8)}\n")
-            submit_info.write(f"FailureDetectionJobErrors={deadline_settings.get('failure_detection_job_errors', 20)}\n")
-
-            # Blacklist
-            if deadline_settings.get('submit_allow_list_as_deny_list', False):
-                submit_info.write(f"Blacklist={deadline_settings['machine_list']}\n")
-            else:
-                submit_info.write(f"Whitelist={deadline_settings['machine_list']}\n")
-
-            # Submit Suspended
-            if deadline_settings.get('submit_suspended', False):
-                submit_info.write(f"InitialStatus=Suspended\n")
-
-            # Frame List
-            if not is_movie and multi_machine:
-                submit_info.write(f"Frames=1-{round(deadline_settings.get('multi_machine_tasks', False))}\n")
-            else:
-                submit_info.write(f"Frames={frame_list}\n")
-
-            # Output file for all output modules
-            index = 0
-            for i in range(1, render_queue_item.numOutputModules + 1):
-                output_module = render_queue_item.outputModule(i)
-                output_file_name = output_module.file.name
-                submit_info.write(f"OutputFilename{index}={render_queue_item.outputModule(i).file.fsName.replace('[#', '#').replace('#]', '#')}\n")
-
-            # Movie settings
-            if is_movie:
-                # Override these settings for movie formats
-                submit_info.write(f"MachineLimit=1\n")
-                submit_info.write(f"ChunkSize=1000000\n")
-            else:
-                if multi_machine:
-                    submit_info.write(f"MachineLimit=0\n")
-                    submit_info.write(f"ChunkSize=1\n")
-                else:
-                    submit_info.write(f"MachineLimit={deadline_settings.get('machine_limit', 0)}\n")
-                    submit_info.write(f"ChunkSize={deadline_settings.get('chunk_size', 15)}\n")
-
+        # Build job_attrs dict
+        job_attrs = {
+            "Plugin": "AfterEffects",
+            "Name": job_name,
+            "UserName": os.getlogin(),
+            "Comment": deadline_settings.get('comment', ''),
+            "Department": deadline_settings.get('department', self.project_name or ''),
+            "Group": deadline_settings.get('group', 'ae'),
+            "Pool": deadline_settings.get('pool', 'none'),
+            "SecondaryPool": deadline_settings.get('secondary_pool', 'none'),
+            "Priority": deadline_settings.get('priority', 30),
+            "TaskTimeoutMinutes": deadline_settings.get('task_timeout_minutes', '0'),
+            "LimitGroups": deadline_settings.get('limit_groups', ''),
+            "ConcurrentTasks": deadline_settings.get('concurrent_tasks', '1'),
+            "LimitConcurrentTasksToNumberOfCpus": deadline_settings.get('limit_concurrent_tasks_to_number_cpus', '0'),
+            "JobDependencies": current_job_dependencies,
+            "OnJobComplete": deadline_settings.get('on_job_complete', 'Nothing'),
+            "FailureDetectionTaskErrors": deadline_settings.get('failure_detection_task_errors', 8),
+            "FailureDetectionJobErrors": deadline_settings.get('failure_detection_job_errors', 20),
+        }
+        if dependent_comps:
+            job_attrs["BatchName"] = f"{self.project_name} - {ae_project_name}"
+        # Blacklist/Whitelist
+        if deadline_settings.get('submit_allow_list_as_deny_list', False):
+            job_attrs["Blacklist"] = deadline_settings['machine_list']
+        else:
+            job_attrs["Whitelist"] = deadline_settings['machine_list']
+        # Submit Suspended
+        if deadline_settings.get('submit_suspended', False):
+            job_attrs["InitialStatus"] = "Suspended"
+        # Frame List
+        if not is_movie and multi_machine:
+            job_attrs["Frames"] = f"1-{round(deadline_settings.get('multi_machine_tasks', False))}"
+        else:
+            job_attrs["Frames"] = frame_list
+        # Output files
+        for index in range(render_queue_item.numOutputModules):
+            output_module = render_queue_item.outputModule(index + 1)
+            key = f"OutputFilename{index}"
+            value = output_module.file.fsName.replace('[#', '#').replace('#]', '#')
+            job_attrs[key] = value
+        # Movie/Chunk settings
+        if is_movie:
+            job_attrs["MachineLimit"] = 1
+            job_attrs["ChunkSize"] = 1000000
+        else:
             if multi_machine:
-                submit_info.write(f"ExtraInfoKeyValue0=FrameRangeOverride={frame_list}\n")
+                job_attrs["MachineLimit"] = 0
+                job_attrs["ChunkSize"] = 1
+            else:
+                job_attrs["MachineLimit"] = deadline_settings.get('machine_limit', 0)
+                job_attrs["ChunkSize"] = deadline_settings.get('chunk_size', 15)
+        if multi_machine:
+            job_attrs["ExtraInfoKeyValue0"] = f"FrameRangeOverride={frame_list}"
 
-        # Create plugin info file
-        with open(plugin_info_path, "w") as plugin_info:
-
-            plugin_info.write(f"SceneFile={render_file}\n")
-            plugin_info.write(f"Comp={comp_name}\n")
-
+        # Build plugin_attrs dict
+        plugin_attrs = {
+            "SceneFile": render_file,
+            "Comp": comp_name,
+            "Version": version,
+            "SubmittedFromVersion": self.adobe.app.version,
+            "IgnoreMissingLayerDependenciesErrors": deadline_settings.get('missing_layers', False),
+            "IgnoreMissingEffectReferencesErrors": deadline_settings.get('missing_effects', False),
+            "FailOnWarnings": deadline_settings.get('fail_on_warnings', False),
+            "MultiProcess": deadline_settings.get('multi_process', False),
+            "ContinueOnMissingFootage": deadline_settings.get('missing_footage', False),
+        }
+        if deadline_settings.get('include_output_path', False):
+            plugin_attrs["Output"] = output_folder
+        if multi_machine:
+            plugin_attrs["MultiMachineMode"] = True
+            plugin_attrs["MultiMachineStartFrame"] = start_frame
+            plugin_attrs["MultiMachineEndFrame"] = end_frame
+        if not multi_machine:
+            min_file_size = deadline_settings.get('file_size', 0)
+            delete_files_under_min_size = deadline_settings.get('delete_files', False)
+            if deadline_settings.get('fail_on_missing_file', False):
+                min_file_size = max(1, round(deadline_settings.get('file_size', 0)))
+                delete_files_under_min_size = True
+            plugin_attrs["MinFileSize"] = min_file_size
+            plugin_attrs["DeleteFilesUnderMinSize"] = delete_files_under_min_size
             if deadline_settings.get('include_output_path', False):
-                plugin_info.write(f"Output={output_folder}\n")
+                plugin_attrs["LocalRendering"] = deadline_settings.get('local_rendering', False)
+        plugin_attrs["OverrideFailOnExistingAEProcess"] = deadline_settings.get('override_fail_on_existing_ae_process', False)
+        plugin_attrs["FailOnExistingAEProcess"] = deadline_settings.get('fail_on_existing_ae_process', False)
+        plugin_attrs["MemoryManagement"] = deadline_settings.get('memory_management', False)
+        plugin_attrs["ImageCachePercentage"] = round(deadline_settings.get('image_cache_percentage', 0))
+        plugin_attrs["MaxMemoryPercentage"] = round(deadline_settings.get('max_memory_percentage', 0))
+        return job_attrs, plugin_attrs
 
-            if multi_machine:
-                plugin_info.write(f"MultiMachineMode=True\n")
-                plugin_info.write(f"MultiMachineStartFrame={start_frame}\n")
-                plugin_info.write(f"MultiMachineEndFrame={end_frame}\n")
-
-            plugin_info.write(f"Version={version}\n")
-            plugin_info.write(f"SubmittedFromVersion={self.adobe.app.version}\n")
-            plugin_info.write(f"IgnoreMissingLayerDependenciesErrors={deadline_settings.get('missing_layers', False)}\n")
-            plugin_info.write(f"IgnoreMissingEffectReferencesErrors={deadline_settings.get('missing_effects', False)}\n")
-            plugin_info.write(f"FailOnWarnings={deadline_settings.get('fail_on_warnings', False)}\n")
-
-            if not multi_machine:
-                min_file_size = deadline_settings.get('file_size', 0)
-                delete_files_under_min_size = deadline_settings.get('delete_files', False)
-
-                if deadline_settings.get('fail_on_missing_file', False):
-                    min_file_size = max(1, round(deadline_settings.get('file_size', 0)))
-                    delete_files_under_min_size = True
-
-                plugin_info.write(f"MinFileSize={min_file_size}\n")
-                plugin_info.write(f"DeleteFilesUnderMinSize={delete_files_under_min_size}\n")
-
-                if deadline_settings.get('include_output_path', False):
-                    plugin_info.write(f"LocalRendering={deadline_settings.get('local_rendering', False)}\n")
-
-            # Fail on existing AE process
-            plugin_info.write(f"OverrideFailOnExistingAEProcess={deadline_settings.get('override_fail_on_existing_ae_process', False)}\n")
-            plugin_info.write(f"FailOnExistingAEProcess={deadline_settings.get('fail_on_existing_ae_process', False)}\n")
-
-            plugin_info.write(f"MemoryManagement={deadline_settings.get('memory_management', False)}\n")
-            plugin_info.write(f"ImageCachePercentage={round(deadline_settings.get('image_cache_percentage', 0))}\n")
-            plugin_info.write(f"MaxMemoryPercentage={round(deadline_settings.get('max_memory_percentage', 0))}\n")
-
-            # Multi-process
-            plugin_info.write(f"MultiProcess={deadline_settings.get('multi_process', False)}\n")
-
-            plugin_info.write(f"ContinueOnMissingFootage={deadline_settings.get('missing_footage', False)}\n")
-
-
-        # Submit to Deadline
-        args = [submit_info_path, plugin_info_path]
-        results = self.call_deadline_command(args)
-
-        logger.info("Deadline submission results: %s" % results)
+    def submit_render_queue_item_to_deadline_deadlineconnect(self, job_attrs, plugin_attrs):
+        """
+        Submits a job to Deadline using DeadlineConnect with the provided job and plugin dictionaries.
+        """
+        try:
+            import Deadline.DeadlineConnect as Connect
+            host = self.deadline_host
+            port = self.deadline_port
+            deadline = Connect.DeadlineCon(host, port)
+            job = deadline.Jobs.SubmitJob(job_attrs, plugin_attrs)
+            logger.info(f"Deadline submission results: {job}")
+            if isinstance(job, dict):
+                    if '_id' in job:
+                        logger.info(f"Submitted Job ID: {job['_id']}")
+            else:
+                logger.error(f"Deadline submission error: {job}")
+        except Exception as e:
+            logger.error(f"DeadlineConnect submission failed: {e}")
+            logger.error(traceback.format_exc())
+            raise
 
     def apply_and_submit(self):
         """
