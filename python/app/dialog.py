@@ -2053,8 +2053,14 @@ class AppDialog(QtGui.QWidget):
 
                 # Using the jsx method for manifest generation as it is significantly faster than the python method
                 self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
-
                 logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
+                # TODO: This will currently run more than once when it shouldn't, need to come refactor this for multi comp submissions
+                # Generate a project manifest file for all comps in the project through jsx
+                self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
+
                 secondary_step += 1
                 self.update_progress_bar(secondary_step, primary=False)
                 QtGui.QApplication.processEvents()
