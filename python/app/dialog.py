@@ -101,6 +101,8 @@ class AppDialog(QtGui.QWidget):
         self.first_frame = self._app.get_setting('default_first_frame')
         self.last_frame = self._app.get_setting('default_last_frame')
         self.deadline_defaults = self._app.get_setting('deadline_defaults')
+        self.deadline_host = self._app.get_setting('deadline_host')
+        self.deadline_port = self._app.get_setting('deadline_port')
         self.render_preset_movie_formats = self._app.get_setting('render_preset_movie_formats')
 
         # Deadline variables
@@ -2074,13 +2076,16 @@ class AppDialog(QtGui.QWidget):
             try:
                 self.update_progress_bar_format(f"Submitting {compName} to Deadline...", primary=False)
                 QtGui.QApplication.processEvents()
-                self.submit_render_queue_item_to_deadline(render_queue_item=render_queue_item,
-                                                          deadline_settings=current_deadline_settings,
-                                                          project_path=project_path,
-                                                          layers=False,
-                                                          previous_job_id=previous_job_id,
-                                                          version=version,
-                                                          render_file=render_scene_file_path)
+                job_attrs, plugin_attrs = self.build_deadline_job_and_plugin_dicts(
+                    render_queue_item=render_queue_item,
+                    deadline_settings=current_deadline_settings,
+                    project_path=project_path,
+                    layers=False,
+                    previous_job_id=previous_job_id,
+                    version=version,
+                    render_file=render_scene_file_path
+                )
+                self.submit_render_queue_item_to_deadline_deadlineconnect(job_attrs, plugin_attrs)
 
                 logger.debug("Render queue item submitted to Deadline: %s" % render_queue_item.comp.name)
 
@@ -2121,47 +2126,26 @@ class AppDialog(QtGui.QWidget):
         else:
             self.message_box("Deadline Submission", "Submission completed successfully.\n\n%d jobs submitted to Deadline." % num_successful_submissions)
 
-    def submit_render_queue_item_to_deadline(self,
-                                             render_queue_item,
-                                             deadline_settings,
-                                             project_path,
-                                             layers,
-                                             previous_job_id,
-                                             version,
-                                             render_file):
-        """
-            Submit the render queue item to Deadline
 
-            Layer submission is not supported yet, so this is a placeholder for now
-            Iv removed some of the checks and statements that were inplace for older after effects versions
-            I have also kept the code and structure as close to the original submitter as possible for now
+    def build_deadline_job_and_plugin_dicts(self, render_queue_item, deadline_settings, project_path, layers, previous_job_id, version, render_file):
+        """
+        Builds the required job_attrs and plugin_attrs dictionaries for submitting a job to DeadlineConnect based on the provided render queue item and settings.
 
             Arguments:
-                render_queue_item: The render queue item to submit
-                deadline_settings: The deadline settings to use for submission
-                project_path: The path to the project file
-                layers: Whether to submit layers (not supported yet)
-                previous_job_id: The job ID of the previous job (for dependencies)
-                version: The version of After Effects
-                render_file: The path to the render scene file
+                render_queue_item (RenderQueueItem): The render queue item to submit job for.
+                deadline_settings (dict): The current Deadline settings from the UI.
+                project_path (str): The file path of the current After Effects project.
+                layers (bool): Whether to include layer information in the plugin attributes.
+                previous_job_id (str): The job ID of the previously submitted job to set as a dependency, if any.
+                version (str): The version of After Effects being used.
+                render_file (str): The file path of the render scene to submit.
 
-            Returns:
-                None
+        Returns (job_attrs, plugin_attrs) for DeadlineConnect submission.
         """
-        logger.debug("Submitting render queue item to Deadline: %s" % render_queue_item.comp.name)
-
         # Output Variables
         output_module = render_queue_item.outputModule(render_queue_item.numOutputModules)
         output_file_name = output_module.file.name
         output_folder = os.path.dirname(output_file_name)
-
-        # Paths
-        temp_folder = os.path.expanduser("~\\temp\\")
-        os.makedirs(temp_folder, exist_ok=True)
-        submit_info_path = os.path.join(temp_folder, "ae_submit_info.job")
-        plugin_info_path = os.path.join(temp_folder, "ae_plugin_info.job")
-
-        # Submission variables
         ae_project_name = os.path.basename(self.adobe.app.project.file.name)
         job_name = f"{self.project_name} - {ae_project_name} - {render_queue_item.comp.name}"
         start_frame = ""
@@ -2174,8 +2158,6 @@ class AppDialog(QtGui.QWidget):
         comp_name = render_queue_item.comp.name
         dependent_job_id = previous_job_id or ""
         dependent_comps = False
-
-        # Check if the output module is rendering a movie
         is_movie = any(output_file_name.endswith(ext) for ext in self.deadline_defaults["movie_formats"])
 
         if override_frame_list or multi_machine:
@@ -2193,7 +2175,7 @@ class AppDialog(QtGui.QWidget):
                 frame_list = f"{start_frame},{end_frame},{frame_list}"
 
         current_job_dependencies = deadline_settings.get('job_dependencies', "")
-        if dependent_comps and dependent_job_id is not "":
+        if dependent_comps and dependent_job_id != "":
             if current_job_dependencies == "":
                 current_job_dependencies = dependent_job_id
             else:
@@ -2202,118 +2184,116 @@ class AppDialog(QtGui.QWidget):
         if multi_machine:
             job_name = f"{job_name} (multi-machine rendering {frame_list})"
 
-        # Create submission info file
-        with open(submit_info_path, "w") as submit_info:
-            submit_info.write(f"Plugin=AfterEffects\n")
-            submit_info.write(f"Name={job_name}\n")
-            if dependent_comps:
-                submit_info.write(f"BatchName={self.project_name} - {ae_project_name}\n")
-            submit_info.write(f"Comment={deadline_settings.get('comment', '')}\n")
-            submit_info.write(f"Department={deadline_settings.get('department', self.project_name or '')}\n")
-            submit_info.write(f"Group={deadline_settings.get('group', 'ae')}\n")
-            submit_info.write(f"Pool={deadline_settings.get('pool', 'none')}\n")
-            submit_info.write(f"SecondaryPool={deadline_settings.get('secondary_pool', 'none')}\n")
-            submit_info.write(f"Priority={deadline_settings.get('priority', 30)}\n")
-            submit_info.write(f"TaskTimeoutMinutes={deadline_settings.get('task_timeout_minutes', '0')}\n")
-            submit_info.write(f"LimitGroups={deadline_settings.get('limit_groups', '')}\n")
-            submit_info.write(f"ConcurrentTasks={deadline_settings.get('concurrent_tasks', '1')}\n")
-            submit_info.write(f"LimitConcurrentTasksToNumberOfCpus={deadline_settings.get('limit_concurrent_tasks_to_number_cpus', '0')}\n")
-            submit_info.write(f"JobDependencies={current_job_dependencies}\n")
-            submit_info.write(f"OnJobComplete={deadline_settings.get('on_job_complete', 'Nothing')}\n")
-            submit_info.write(f"FailureDetectionTaskErrors={deadline_settings.get('failure_detection_task_errors', 8)}\n")
-            submit_info.write(f"FailureDetectionJobErrors={deadline_settings.get('failure_detection_job_errors', 20)}\n")
-
-            # Blacklist
-            if deadline_settings.get('submit_allow_list_as_deny_list', False):
-                submit_info.write(f"Blacklist={deadline_settings['machine_list']}\n")
-            else:
-                submit_info.write(f"Whitelist={deadline_settings['machine_list']}\n")
-
-            # Submit Suspended
-            if deadline_settings.get('submit_suspended', False):
-                submit_info.write(f"InitialStatus=Suspended\n")
-
-            # Frame List
-            if not is_movie and multi_machine:
-                submit_info.write(f"Frames=1-{round(deadline_settings.get('multi_machine_tasks', False))}\n")
-            else:
-                submit_info.write(f"Frames={frame_list}\n")
-
-            # Output file for all output modules
-            index = 0
-            for i in range(1, render_queue_item.numOutputModules + 1):
-                output_module = render_queue_item.outputModule(i)
-                output_file_name = output_module.file.name
-                submit_info.write(f"OutputFilename{index}={render_queue_item.outputModule(i).file.fsName.replace('[#', '#').replace('#]', '#')}\n")
-
-            # Movie settings
-            if is_movie:
-                # Override these settings for movie formats
-                submit_info.write(f"MachineLimit=1\n")
-                submit_info.write(f"ChunkSize=1000000\n")
-            else:
-                if multi_machine:
-                    submit_info.write(f"MachineLimit=0\n")
-                    submit_info.write(f"ChunkSize=1\n")
-                else:
-                    submit_info.write(f"MachineLimit={deadline_settings.get('machine_limit', 0)}\n")
-                    submit_info.write(f"ChunkSize={deadline_settings.get('chunk_size', 15)}\n")
-
+        # Build job_attrs dict
+        job_attrs = {
+            "Plugin": "AfterEffects",
+            "Name": job_name,
+            "UserName": os.getlogin(),
+            "Comment": deadline_settings.get('comment', ''),
+            "Department": deadline_settings.get('department', self.project_name or ''),
+            "Group": deadline_settings.get('group', 'ae'),
+            "Pool": deadline_settings.get('pool', 'none'),
+            "SecondaryPool": deadline_settings.get('secondary_pool', 'none'),
+            "Priority": deadline_settings.get('priority', 30),
+            "TaskTimeoutMinutes": deadline_settings.get('task_timeout_minutes', '0'),
+            "LimitGroups": deadline_settings.get('limit_groups', ''),
+            "ConcurrentTasks": deadline_settings.get('concurrent_tasks', '1'),
+            "LimitConcurrentTasksToNumberOfCpus": deadline_settings.get('limit_concurrent_tasks_to_number_cpus', '0'),
+            "JobDependencies": current_job_dependencies,
+            "OnJobComplete": deadline_settings.get('on_job_complete', 'Nothing'),
+            "FailureDetectionTaskErrors": deadline_settings.get('failure_detection_task_errors', 8),
+            "FailureDetectionJobErrors": deadline_settings.get('failure_detection_job_errors', 20),
+        }
+        if dependent_comps:
+            job_attrs["BatchName"] = f"{self.project_name} - {ae_project_name}"
+        # Blacklist/Whitelist
+        if deadline_settings.get('submit_allow_list_as_deny_list', False):
+            job_attrs["Blacklist"] = deadline_settings['machine_list']
+        else:
+            job_attrs["Whitelist"] = deadline_settings['machine_list']
+        # Submit Suspended
+        if deadline_settings.get('submit_suspended', False):
+            job_attrs["InitialStatus"] = "Suspended"
+        # Frame List
+        if not is_movie and multi_machine:
+            job_attrs["Frames"] = f"1-{round(deadline_settings.get('multi_machine_tasks', False))}"
+        else:
+            job_attrs["Frames"] = frame_list
+        # Output files
+        for index in range(render_queue_item.numOutputModules):
+            output_module = render_queue_item.outputModule(index + 1)
+            key = f"OutputFilename{index}"
+            value = output_module.file.fsName.replace('[#', '#').replace('#]', '#')
+            job_attrs[key] = value
+        # Movie/Chunk settings
+        if is_movie:
+            job_attrs["MachineLimit"] = 1
+            job_attrs["ChunkSize"] = 1000000
+        else:
             if multi_machine:
-                submit_info.write(f"ExtraInfoKeyValue0=FrameRangeOverride={frame_list}\n")
+                job_attrs["MachineLimit"] = 0
+                job_attrs["ChunkSize"] = 1
+            else:
+                job_attrs["MachineLimit"] = deadline_settings.get('machine_limit', 0)
+                job_attrs["ChunkSize"] = deadline_settings.get('chunk_size', 15)
+        if multi_machine:
+            job_attrs["ExtraInfoKeyValue0"] = f"FrameRangeOverride={frame_list}"
 
-        # Create plugin info file
-        with open(plugin_info_path, "w") as plugin_info:
-
-            plugin_info.write(f"SceneFile={render_file}\n")
-            plugin_info.write(f"Comp={comp_name}\n")
-
+        # Build plugin_attrs dict
+        plugin_attrs = {
+            "SceneFile": render_file,
+            "Comp": comp_name,
+            "Version": version,
+            "SubmittedFromVersion": self.adobe.app.version,
+            "IgnoreMissingLayerDependenciesErrors": deadline_settings.get('missing_layers', False),
+            "IgnoreMissingEffectReferencesErrors": deadline_settings.get('missing_effects', False),
+            "FailOnWarnings": deadline_settings.get('fail_on_warnings', False),
+            "MultiProcess": deadline_settings.get('multi_process', False),
+            "ContinueOnMissingFootage": deadline_settings.get('missing_footage', False),
+        }
+        if deadline_settings.get('include_output_path', False):
+            plugin_attrs["Output"] = output_folder
+        if multi_machine:
+            plugin_attrs["MultiMachineMode"] = True
+            plugin_attrs["MultiMachineStartFrame"] = start_frame
+            plugin_attrs["MultiMachineEndFrame"] = end_frame
+        if not multi_machine:
+            min_file_size = deadline_settings.get('file_size', 0)
+            delete_files_under_min_size = deadline_settings.get('delete_files', False)
+            if deadline_settings.get('fail_on_missing_file', False):
+                min_file_size = max(1, round(deadline_settings.get('file_size', 0)))
+                delete_files_under_min_size = True
+            plugin_attrs["MinFileSize"] = min_file_size
+            plugin_attrs["DeleteFilesUnderMinSize"] = delete_files_under_min_size
             if deadline_settings.get('include_output_path', False):
-                plugin_info.write(f"Output={output_folder}\n")
+                plugin_attrs["LocalRendering"] = deadline_settings.get('local_rendering', False)
+        plugin_attrs["OverrideFailOnExistingAEProcess"] = deadline_settings.get('override_fail_on_existing_ae_process', False)
+        plugin_attrs["FailOnExistingAEProcess"] = deadline_settings.get('fail_on_existing_ae_process', False)
+        plugin_attrs["MemoryManagement"] = deadline_settings.get('memory_management', False)
+        plugin_attrs["ImageCachePercentage"] = round(deadline_settings.get('image_cache_percentage', 0))
+        plugin_attrs["MaxMemoryPercentage"] = round(deadline_settings.get('max_memory_percentage', 0))
+        return job_attrs, plugin_attrs
 
-            if multi_machine:
-                plugin_info.write(f"MultiMachineMode=True\n")
-                plugin_info.write(f"MultiMachineStartFrame={start_frame}\n")
-                plugin_info.write(f"MultiMachineEndFrame={end_frame}\n")
-
-            plugin_info.write(f"Version={version}\n")
-            plugin_info.write(f"SubmittedFromVersion={self.adobe.app.version}\n")
-            plugin_info.write(f"IgnoreMissingLayerDependenciesErrors={deadline_settings.get('missing_layers', False)}\n")
-            plugin_info.write(f"IgnoreMissingEffectReferencesErrors={deadline_settings.get('missing_effects', False)}\n")
-            plugin_info.write(f"FailOnWarnings={deadline_settings.get('fail_on_warnings', False)}\n")
-
-            if not multi_machine:
-                min_file_size = deadline_settings.get('file_size', 0)
-                delete_files_under_min_size = deadline_settings.get('delete_files', False)
-
-                if deadline_settings.get('fail_on_missing_file', False):
-                    min_file_size = max(1, round(deadline_settings.get('file_size', 0)))
-                    delete_files_under_min_size = True
-
-                plugin_info.write(f"MinFileSize={min_file_size}\n")
-                plugin_info.write(f"DeleteFilesUnderMinSize={delete_files_under_min_size}\n")
-
-                if deadline_settings.get('include_output_path', False):
-                    plugin_info.write(f"LocalRendering={deadline_settings.get('local_rendering', False)}\n")
-
-            # Fail on existing AE process
-            plugin_info.write(f"OverrideFailOnExistingAEProcess={deadline_settings.get('override_fail_on_existing_ae_process', False)}\n")
-            plugin_info.write(f"FailOnExistingAEProcess={deadline_settings.get('fail_on_existing_ae_process', False)}\n")
-
-            plugin_info.write(f"MemoryManagement={deadline_settings.get('memory_management', False)}\n")
-            plugin_info.write(f"ImageCachePercentage={round(deadline_settings.get('image_cache_percentage', 0))}\n")
-            plugin_info.write(f"MaxMemoryPercentage={round(deadline_settings.get('max_memory_percentage', 0))}\n")
-
-            # Multi-process
-            plugin_info.write(f"MultiProcess={deadline_settings.get('multi_process', False)}\n")
-
-            plugin_info.write(f"ContinueOnMissingFootage={deadline_settings.get('missing_footage', False)}\n")
-
-
-        # Submit to Deadline
-        args = [submit_info_path, plugin_info_path]
-        results = self.call_deadline_command(args)
-        logger.info("Deadline submission results: %s" % results)
+    def submit_render_queue_item_to_deadline_deadlineconnect(self, job_attrs, plugin_attrs):
+        """
+        Submits a job to Deadline using DeadlineConnect with the provided job and plugin dictionaries.
+        """
+        try:
+            import Deadline.DeadlineConnect as Connect
+            host = self.deadline_host
+            port = self.deadline_port
+            deadline = Connect.DeadlineCon(host, port)
+            job = deadline.Jobs.SubmitJob(job_attrs, plugin_attrs)
+            logger.info(f"Deadline submission results: {job}")
+            if isinstance(job, dict):
+                    if '_id' in job:
+                        logger.info(f"Submitted Job ID: {job['_id']}")
+            else:
+                logger.error(f"Deadline submission error: {job}")
+        except Exception as e:
+            logger.error(f"DeadlineConnect submission failed: {e}")
+            logger.error(traceback.format_exc())
+            raise
 
     def apply_and_submit(self):
         """
