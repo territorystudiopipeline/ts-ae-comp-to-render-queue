@@ -37,64 +37,89 @@ try {
     DEBUG = 0;
 }
 
+// Error logging helper
+function logError(msg) {
+    try {
+        var logFile;
+        if (app.project && app.project.file && app.project.file.parent) {
+            logFile = new File(app.project.file.parent.fsName + "/ae_manifest_error.log");
+        } else {
+            logFile = new File(Folder.myDocuments + "/ae_manifest_error.log");
+        }
+        if (logFile.open("a")) {
+            logFile.writeln((new Date()).toISOString() + " - " + msg);
+            logFile.close();
+        }
+    } catch (e) {}
+}
+
+// Safe file writing helper
+function safeWriteFile(filePath, data) {
+    var file = new File(filePath);
+    if (!file.open("w")) {
+        var errMsg = "Cannot open manifest file for writing: " + filePath;
+        logError(errMsg);
+        throw new Error(errMsg);
+    }
+    try {
+        file.write(data);
+    } catch (e) {
+        logError("Error writing manifest: " + e.toString());
+        throw e;
+    } finally {
+        file.close();
+    }
+}
+
 // Try to read comp identifiers from a JSON file in the project folder
 function getCompsToAnalyzeFromJson() {
     var compsList = null;
     var projectFile = app.project.file;
     if (!projectFile) {
-        if (DEBUG) alert("Project file is not saved. Please save your project before running this script.");
+        var msg = "Project file is not saved. Please save your project before running this script.";
+        logError(msg);
+        if (DEBUG) alert(msg);
         return null;
     }
     var projectFolder = projectFile.parent;
     var parentFolder = projectFolder.parent;
     var jsonFile = null;
-    // List all files in projectFolder for debugging
-    var allFiles = projectFolder.getFiles();
-    var allNames = [];
-    for (var j = 0; j < allFiles.length; j++) {
-        allNames.push(allFiles[j].fsName);
-     }
-     if (DEBUG) alert("Files in project folder (" + projectFolder.fsName + "):\n" + allNames.join("\n"));
-     if (DEBUG) alert("Files in parent folder (" + parentFolder.fsName + "):\n" + parentNames.join("\n"));
-
-     // Search for _comp_identifiers.json manually
-    for (var j = 0; j < allFiles.length; j++) {
-        var fileObj = allFiles[j];
-        if (fileObj instanceof File && fileObj.name.match(/_comp_identifiers\.json$/i)) {
-            jsonFile = fileObj;
-            break;
-        }
-    }
-    // If not found, try parent folder
-    if (!jsonFile) {
-        var parentFiles = parentFolder.getFiles();
-        var parentNames = [];
-         for (var k = 0; k < parentFiles.length; k++) {
-             parentNames.push(parentFiles[k].fsName);
-         }
-         if (DEBUG) alert("Files in parent folder (" + parentFolder.fsName + "):\n" + parentNames.join("\n"));
-        for (var k = 0; k < parentFiles.length; k++) {
-            var fileObj = parentFiles[k];
-            if (fileObj instanceof File && fileObj.name.match(/_comp_identifiers\.json$/i)) {
-                jsonFile = fileObj;
+    try {
+        var allFiles = projectFolder.getFiles();
+        for (var j = 0; j < allFiles.length; j++) {
+            if (allFiles[j] instanceof File && allFiles[j].name.match(/_comp_identifiers\.json$/i)) {
+                jsonFile = allFiles[j];
                 break;
             }
         }
-    }
-    if (!jsonFile) {
-        if (DEBUG) alert("_comp_identifiers.json not found in either project or parent folder.");
-        return null;
-    }  else {
-        if (DEBUG) alert("Found _comp_identifiers.json at: " + jsonFile.fsName);
-     }
-    if (jsonFile.open("r")) {
-        try {
-            var jsonStr = jsonFile.read();
-            compsList = JSON.parse(jsonStr);
-        } catch (e) {
-            if (DEBUG) alert("Failed to parse comp identifiers JSON: " + e);
+        if (!jsonFile) {
+            var parentFiles = parentFolder.getFiles();
+            for (var k = 0; k < parentFiles.length; k++) {
+                if (parentFiles[k] instanceof File && parentFiles[k].name.match(/_comp_identifiers\.json$/i)) {
+                    jsonFile = parentFiles[k];
+                    break;
+                }
+            }
         }
-        jsonFile.close();
+        if (!jsonFile) {
+            var msg2 = "_comp_identifiers.json not found in either project or parent folder.";
+            logError(msg2);
+            if (DEBUG) alert(msg2);
+            return null;
+        }
+        if (jsonFile.open("r")) {
+            try {
+                var jsonStr = jsonFile.read();
+                compsList = JSON.parse(jsonStr);
+            } catch (e) {
+                logError("Failed to parse comp identifiers JSON: " + e.toString());
+                if (DEBUG) alert("Failed to parse comp identifiers JSON: " + e);
+                compsList = null;
+            }
+            jsonFile.close();
+        }
+    } catch (e) {
+        logError("Error reading comp identifiers JSON: " + e.toString());
     }
     return compsList;
 }
@@ -243,22 +268,28 @@ function collectManifestData(comp, manifestCache, sceneFilePath) {
     return manifest;
 }
 
-function writeManifestFile(manifest, folderPath) {
-    var fileName = manifest.comp_name + "_manifest.json";
-    var folderString = (folderPath instanceof Folder) ? folderPath.fsName : folderPath;
-    var file = new File(folderString + "/" + fileName);
-    file.open("w");
-    file.write(JSON.stringify(manifest, null, 4));
-    file.close();
+function writeManifestFile(manifest, outputFolderPath) {
+    var filePath = outputFolderPath + "/" + manifest.comp_name + "_manifest.json";
+    try {
+        safeWriteFile(filePath, JSON.stringify(manifest, null, 4));
+    } catch (e) {
+        logError("Failed to write manifest for comp '" + manifest.comp_name + "': " + e.toString());
+        if (DEBUG) alert("Failed to write manifest for comp '" + manifest.comp_name + "': " + e);
+    }
 }
 
 function main() {
     if (!app.project || !app.project.file) {
-        if (DEBUG) alert("No project is open. Please open a project before running this script.");
+        var msg = "No project is open. Please open a project before running this script.";
+        logError(msg);
+        if (DEBUG) alert(msg);
         return;
     }
+    var compsToAnalyze = getCompsToAnalyzeFromJson();
     if (!compsToAnalyze || !compsToAnalyze.length) {
-        if (DEBUG) alert("No comps to analyze. Please check your _comp_identifiers.json file or input list.");
+        var msg2 = "No comps to analyze. Please check your _comp_identifiers.json file or input list.";
+        logError(msg2);
+        if (DEBUG) alert(msg2);
         return;
     }
     var manifestCache = {};
@@ -271,14 +302,15 @@ function main() {
             if (DEBUG) alert("No output_location specified for comp '" + compInfo.name + "'. Manifest will be saved to project folder.");
             outputFolderPath = app.project.file.parent.fsName;
         }
-        // Use File/Folder to join paths for OS-agnostic separator
         var sceneFilePath = (new File(outputFolderPath + "/" + sceneFileName)).fsName;
         if (comp) {
             var manifest = collectManifestData(comp, manifestCache, sceneFilePath);
             writeManifestFile(manifest, outputFolderPath);
-        } // else {
-            // alert("Comp not found: '" + compInfo.name + "' (id: " + compInfo.id + ")\nCheck that the comp exists in the project and the name matches exactly.\nAll comp names in the project: " + getAllCompNames().join(", "));
-        // }
+        } else {
+            var notFoundMsg = "Comp not found: '" + compInfo.name + "' (id: " + compInfo.id + ")";
+            logError(notFoundMsg);
+            if (DEBUG) alert(notFoundMsg);
+        }
     }
     // alert("Manifest files created.");
 }
@@ -294,4 +326,10 @@ function getAllCompNames() {
     return names;
 }
 
-main();
+try {
+    main();
+} catch (e) {
+    logError("Manifest generation failed: " + e.toString() + (e.line ? " (Line: " + e.line + ")" : ""));
+    if (DEBUG) alert("Manifest generation failed. See ae_manifest_error.log in your Documents folder.");
+    throw e;
+}
