@@ -672,9 +672,16 @@ class AppDialog(QtGui.QWidget):
         with open(manifest_file_path, "w") as manifest_file:
             json.dump(manifest_data, manifest_file, indent=4)
 
-    def generate_manifest_file_for_queue_item_jsx(self, render_queue_item, render_scene_file_path):
+    def _run_jsx_manifest_generation(self, comp_identifiers, jsx_script_path):
         """
-        Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file.
+            Shared helper to write comp_identifiers to _comp_identifiers.json and run the specified JSX script.
+
+            Arguments:
+                comp_identifiers (list): A list of comp_identifiers to run the JSX script.
+                jsx_script_path (str): The path to the JSX script to be run.
+
+            Returns:
+            None
         """
         def _after_effects_version_to_year(major_version):
             """
@@ -697,108 +704,107 @@ class AppDialog(QtGui.QWidget):
                 logger.error(f"Unable to parse After Effects version: {self.ae_version}")
                 return major_version
 
+        # Validate comp_identifiers
+        if not isinstance(comp_identifiers, list) or not comp_identifiers:
+            logger.error("comp_identifiers must be a non-empty list.")
+            return
+        required_fields = ("name", "id", "output_location")
+        for idx, comp in enumerate(comp_identifiers):
+            if not isinstance(comp, dict):
+                logger.error(f"comp_identifiers[{idx}] is not a dict: {comp}")
+                return
+            for field in required_fields:
+                if field not in comp or comp[field] in (None, ""):
+                    logger.error(f"comp_identifiers[{idx}] missing or empty required field '{field}': {comp}")
+                    return
+
+        # Check After Effects project file existence
+        current_comp_file_path = getattr(self.adobe.app.project.file, 'fsName', None)
+        if not current_comp_file_path or not os.path.isfile(current_comp_file_path):
+            logger.error(f"After Effects project file not found or invalid: {current_comp_file_path}")
+            return
+
+        # Check directory writability for _comp_identifiers.json
+        comp_id_dir = os.path.dirname(current_comp_file_path)
+        if not os.path.isdir(comp_id_dir):
+            logger.error(f"Directory for comp identifiers does not exist: {comp_id_dir}")
+            return
+        if not os.access(comp_id_dir, os.W_OK):
+            logger.error(f"No write permission for directory: {comp_id_dir}")
+            return
+
+        # Write comp identifier JSON file next to the project file
+        comp_id_json_path = os.path.join(comp_id_dir, "_comp_identifiers.json")
+        try:
+            with open(comp_id_json_path, "w") as f:
+                json.dump(comp_identifiers, f, indent=4)
+        except Exception as e:
+            logger.error(f"Failed to write comp identifiers JSON: {e}")
+            return
+
+        major_version = str(self.ae_version).split(".")[0]
+        after_effects_version = _after_effects_version_to_year(major_version)
+        afterfx_path = r"C:\Program Files\Adobe\Adobe After Effects %s\Support Files\AfterFX.com" % after_effects_version
+
+        # Check AfterFX executable existence
+        if not os.path.isfile(afterfx_path):
+            logger.error(f"AfterFX executable not found: {afterfx_path}")
+            return
+
+        command = [afterfx_path, "-ro", jsx_script_path]
+        try:
+            subprocess.run(command, check=True)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"JSX script failed to execute: {e}", file=sys.stderr)
+            logger.error(f"{e.stderr}", file=sys.stderr)
+        except OSError as e:
+            logger.error(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
+            logger.error(f"Command: {' '.join(command)}")
+
+    def generate_manifest_file_for_queue_item_jsx(self, render_queue_item, render_scene_file_path):
+        """
+            Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file.
+
+            Arguments:
+                render_queue_item (RenderQueueItem): The render queue item to generate manifest file.
+                render_scene_file_path (str): The path to the scene file to generate manifest file.
+        """
         comp = render_queue_item.comp
         comp_identifier = {
             "name": comp.name,
             "id": getattr(comp, 'id', None),
             "output_location": os.path.dirname(render_scene_file_path)
         }
-        # Write comp identifier JSON file next to the scene file using current scene file path
-        current_comp_file_path = self.adobe.app.project.file.fsName
-        # Place the comp identifier JSON in the same directory as the scene file with the name "_comp_identifiers.json"
-        comp_id_json_path =  os.path.join(os.path.dirname(current_comp_file_path), "_comp_identifiers.json")
-        with open(comp_id_json_path, "w") as f:
-            json.dump([comp_identifier], f, indent=4)
+        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../jsx/generate_manifest_from_comps.jsx'))
 
-        # Path to the JSX script
-        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                                       '../../jsx/generate_manifest_from_comps.jsx'))
+        # Check jsx file exits
+        if jsx_script_path is None or not os.path.exists(jsx_script_path):
+            logger.error(f"JSX script not found at path: {jsx_script_path}")
+            return
 
-        # Convert the major version to the year-based version if necessary
-        major_version = str(self.ae_version).split(".")[0]
-        after_effects_version = _after_effects_version_to_year(major_version)
-
-
-        afterfx_path = r"C:\Program Files\Adobe\Adobe After Effects %s\Support Files\AfterFX.com" % after_effects_version
-        command = [
-            afterfx_path,
-            "-ro",
-            jsx_script_path
-        ]
-        try:
-            subprocess.run(command, check=True)
-        except subprocess.CalledProcessError as e:
-            # This means the AE process started, but then terminated with an error
-            print(f"JSX script failed to execute: {e}", file=sys.stderr)
-            print(f"{e.stderr}", file=sys.stderr)
-        except OSError as e:
-            # This means there was an issue starting the AE process, such as the executable not being found
-            print(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
-            print(f"Command: {' '.join(command)}")
+        self._run_jsx_manifest_generation([comp_identifier], jsx_script_path)
 
     def generate_project_manifest_file_jsx(self, render_queue_item, render_scene_file_path):
         """
-               Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file for the entire project.
-               """
+            Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file for the entire project.
 
-        def _after_effects_version_to_year(major_version):
-            """
-                Converts the major version number of After Effects to the corresponding year-based version string.
-                 - For versions 24 and above, it converts to a year-based version (e.g., 24 to 2024).
-
-                Arguments:
-                    major_version (str): The major version number of After Effects as a string.
-                Returns:
-                    str: The year-based version string for After Effects if major version is 24 or above,
-                    otherwise returns the original major version string.
-            """
-            try:
-                major_version_int = int(major_version)
-                if major_version_int >= 24:
-                    return str(2000 + major_version_int)
-                else:
-                    return major_version
-            except ValueError:
-                logger.error(f"Unable to parse After Effects version: {self.ae_version}")
-                return major_version
-
+            Arguments:
+                render_queue_item (RenderQueueItem): The render queue item to generate manifest file.
+                render_scene_file_path (str): The path to the scene file to generate manifest file.
+        """
         comp = render_queue_item.comp
         comp_identifier = {
             "name": comp.name,
             "id": getattr(comp, 'id', None),
             "output_location": os.path.dirname(render_scene_file_path)
         }
-        # Write comp identifier JSON file next to the scene file using current scene file path
-        current_comp_file_path = self.adobe.app.project.file.fsName
-        # Place the comp identifier JSON in the same directory as the scene file with the name "_comp_identifiers.json"
-        comp_id_json_path = os.path.join(os.path.dirname(current_comp_file_path), "_comp_identifiers.json")
-        with open(comp_id_json_path, "w") as f:
-            json.dump([comp_identifier], f, indent=4)
+        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../jsx/generate_manifest_for_all_comps.jsx'))
 
-        # Path to the JSX script
-        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__),
-                                                       '../../jsx/generate_manifest_for_all_comps.jsx'))
+        if jsx_script_path is None or not os.path.exists(jsx_script_path):
+            logger.error(f"JSX script not found at path: {jsx_script_path}")
+            return
 
-        # Convert the major version to the year-based version if necessary
-        major_version = str(self.ae_version).split(".")[0]
-        after_effects_version = _after_effects_version_to_year(major_version)
-
-        afterfx_path = r"C:\Program Files\Adobe\Adobe After Effects %s\Support Files\AfterFX.com" % after_effects_version
-        command = [
-            afterfx_path,
-            "-ro",
-            jsx_script_path
-        ]
-        try:
-            subprocess.run(command, check=True)
-        except subprocess.CalledProcessError as e:
-            # This means the AE process started, but then terminated with an error
-            print(f"JSX script failed to execute: {e}", file=sys.stderr)
-            print(f"{e.stderr}", file=sys.stderr)
-        except OSError as e:
-            # This means there was an issue starting the AE process, such as the executable not being found
-            print(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
-            print(f"Command: {' '.join(command)}")
+        self._run_jsx_manifest_generation([comp_identifier], jsx_script_path)
 
     def get_fonts_and_plugins_for_comp(self, comp, manifest_data=None):
         """
@@ -978,6 +984,8 @@ class AppDialog(QtGui.QWidget):
         self.show_progress_bar(format_text="Processing render queue items...")
 
         count = 0
+        project_manifest_created = False
+
         for row in range(num_items):
             tableItem = self.ui.compTableWidget.item(row, 0)
             statusItem = self.ui.compTableWidget.item(row, 1)
@@ -1014,10 +1022,20 @@ class AppDialog(QtGui.QWidget):
 
                 # Manifest generation step
                 current_step += 1
-                self.update_progress_bar_format(f"Generating manifest for {compName}...")
+
                 self.update_progress_bar(int(current_step / total_steps * 100))
                 try:
+
+                    if not project_manifest_created:
+                        logger.debug("Generating project manifest file...")
+                        self.update_progress_bar_format(f"Generating project manifest for {compName}...")
+                        # Generate a project manifest file for all comps in the project through jsx
+                        self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                        project_manifest_created = True
+                        logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
                     logger.debug("Generating manifest file for render queue item: %s" % render_queue_item.comp.name)
+                    self.update_progress_bar_format(f"Generating comp manifest for {compName}...")
 
                     # Using the jsx method for manifest generation as it is significantly faster than the python method
                     #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
@@ -1025,10 +1043,6 @@ class AppDialog(QtGui.QWidget):
                     # Generate through jsx
                     self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
                     logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-
-                    # Generate a project manifest file for all comps in the project through jsx
-                    self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
-                    logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
 
                 except Exception as e:
                     logger.error("Failed to generate manifest file: %s" % e)
@@ -1956,6 +1970,8 @@ class AppDialog(QtGui.QWidget):
         # Loop through the render queue items in the table and submit them to Deadline if they are checked
         # and queued in the render queue
         num_rows = self.ui.compTableWidget.rowCount()
+        project_manifest_created = False
+
         for row in range(num_rows):
             # Emit overall progress
             self.update_progress_bar(int(row / num_rows * 100))
@@ -2045,8 +2061,16 @@ class AppDialog(QtGui.QWidget):
 
             # Step 2: Generate manifest
             try:
-                self.update_progress_bar_format(f"Generating manifest for {compName}...", primary=False)
-                QtGui.QApplication.processEvents()
+                if not project_manifest_created:
+                    # Generate a project manifest file for all comps in the project through jsx
+                    self.update_progress_bar_format(f"Generating project manifest for {compName}...", primary=False)
+                    logger.debug("Generating project manifest file...")
+                    self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                    project_manifest_created = True
+                    logger.debug(
+                        "Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+
+                self.update_progress_bar_format(f"Generating comp manifest for {compName}...", primary=False)
                 # Keeping the old method for now as a backup in case the new JSX method causes issues.
                 # The old method is slower but more robust for error catching and reporting
                 #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
@@ -2055,15 +2079,8 @@ class AppDialog(QtGui.QWidget):
                 self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
                 logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
 
-                # TODO: This will currently run more than once when it shouldn't, need to come refactor this for multi comp submissions
-                # Generate a project manifest file for all comps in the project through jsx
-                self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
-                logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-
-
                 secondary_step += 1
                 self.update_progress_bar(secondary_step, primary=False)
-                QtGui.QApplication.processEvents()
 
             except Exception as e:
                 logger.error("Failed to generate manifest file: %s" % e)
