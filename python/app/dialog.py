@@ -1024,38 +1024,39 @@ class AppDialog(QtGui.QWidget):
                 current_step += 1
 
                 self.update_progress_bar(int(current_step / total_steps * 100))
-                try:
 
-                    if not project_manifest_created:
-                        logger.debug("Generating project manifest file...")
-                        self.update_progress_bar_format(f"Generating project manifest for {compName}...")
-                        # Generate a project manifest file for all comps in the project through jsx
-                        self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
-                        project_manifest_created = True
-                        logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-
-                    logger.debug("Generating manifest file for render queue item: %s" % render_queue_item.comp.name)
-                    self.update_progress_bar_format(f"Generating comp manifest for {compName}...")
-
-                    # Using the jsx method for manifest generation as it is significantly faster than the python method
-                    #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
-
-                    # Generate through jsx
-                    self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
-                    logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-
-                except Exception as e:
-                    logger.error("Failed to generate manifest file: %s" % e)
-                    error = traceback.format_exc()
-                    logger.error("%s" % error)
-                    self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
-
-                    # Update the status icon
-                    statusItem.setIcon(self.ui.errorIcon)
-                    statusItem.setToolTip("Error - Failed to generate manifest file")
-                    includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-
-                    continue
+                # try:
+                #
+                #     if not project_manifest_created:
+                #         logger.debug("Generating project manifest file...")
+                #         self.update_progress_bar_format(f"Generating project manifest for {compName}...")
+                #         # Generate a project manifest file for all comps in the project through jsx
+                #         self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                #         project_manifest_created = True
+                #         logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+                #
+                #     logger.debug("Generating manifest file for render queue item: %s" % render_queue_item.comp.name)
+                #     self.update_progress_bar_format(f"Generating comp manifest for {compName}...")
+                #
+                #     # Using the jsx method for manifest generation as it is significantly faster than the python method
+                #     #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+                #
+                #     # Generate through jsx
+                #     self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
+                #     logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+                #
+                # except Exception as e:
+                #     logger.error("Failed to generate manifest file: %s" % e)
+                #     error = traceback.format_exc()
+                #     logger.error("%s" % error)
+                #     self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
+                #
+                #     # Update the status icon
+                #     statusItem.setIcon(self.ui.errorIcon)
+                #     statusItem.setToolTip("Error - Failed to generate manifest file")
+                #     includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                #
+                #     continue
 
                 self.update_progress_bar(int(current_step / total_steps * 100))
 
@@ -2060,40 +2061,40 @@ class AppDialog(QtGui.QWidget):
                 continue
 
             # Step 2: Generate manifest
-            try:
-                if not project_manifest_created:
-                    # Generate a project manifest file for all comps in the project through jsx
-                    self.update_progress_bar_format(f"Generating project manifest for {compName}...", primary=False)
-                    logger.debug("Generating project manifest file...")
-                    self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
-                    project_manifest_created = True
-                    logger.debug(
-                        "Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-
-                self.update_progress_bar_format(f"Generating comp manifest for {compName}...", primary=False)
-                # Keeping the old method for now as a backup in case the new JSX method causes issues.
-                # The old method is slower but more robust for error catching and reporting
-                #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
-
-                # Using the jsx method for manifest generation as it is significantly faster than the python method
-                self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
-                logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-
-                secondary_step += 1
-                self.update_progress_bar(secondary_step, primary=False)
-
-            except Exception as e:
-                logger.error("Failed to generate manifest file: %s" % e)
-                error = traceback.format_exc()
-                logger.error("%s" % error)
-                self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
-
-                # Update the status icon
-                statusItem.setIcon(self.ui.errorIcon)
-                statusItem.setToolTip("Error - Failed to generate manifest file")
-                includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                self.hide_progress_bar(primary=False)
-                continue
+            # try:
+            #     if not project_manifest_created:
+            #         # Generate a project manifest file for all comps in the project through jsx
+            #         self.update_progress_bar_format(f"Generating project manifest for {compName}...", primary=False)
+            #         logger.debug("Generating project manifest file...")
+            #         self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+            #         project_manifest_created = True
+            #         logger.debug(
+            #             "Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+            #
+            #     self.update_progress_bar_format(f"Generating comp manifest for {compName}...", primary=False)
+            #     # Keeping the old method for now as a backup in case the new JSX method causes issues.
+            #     # The old method is slower but more robust for error catching and reporting
+            #     #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
+            #
+            #     # Using the jsx method for manifest generation as it is significantly faster than the python method
+            #     self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
+            #     logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
+            #
+            #     secondary_step += 1
+            #     self.update_progress_bar(secondary_step, primary=False)
+            #
+            # except Exception as e:
+            #     logger.error("Failed to generate manifest file: %s" % e)
+            #     error = traceback.format_exc()
+            #     logger.error("%s" % error)
+            #     self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
+            #
+            #     # Update the status icon
+            #     statusItem.setIcon(self.ui.errorIcon)
+            #     statusItem.setToolTip("Error - Failed to generate manifest file")
+            #     includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+            #     self.hide_progress_bar(primary=False)
+            #     continue
 
             # Step 3: Submit to Deadline
             try:
