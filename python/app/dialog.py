@@ -11,7 +11,6 @@ import shutil
 import subprocess
 import warnings
 import functools
-from doctest import debug
 
 import sgtk
 import os
@@ -26,6 +25,7 @@ import traceback
 # the code will be compatible with both PySide and PyQt.
 from sgtk.platform.qt import QtCore, QtGui
 from .ui.dialog import Ui_Dialog, ItemSelectionDialog
+
 # standard toolkit logger
 logger = sgtk.platform.get_logger(__name__)
 
@@ -2150,7 +2150,6 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.errorIcon)
                 statusItem.setToolTip("Error - Failed to create render scene backup")
                 includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                self.hide_progress_bar(primary=False)
                 continue
 
             # Step 2: Generate manifest
@@ -2185,7 +2184,6 @@ class AppDialog(QtGui.QWidget):
                 statusItem.setIcon(self.ui.errorIcon)
                 statusItem.setToolTip("Error - Failed to generate manifest file")
                 includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                self.hide_progress_bar(primary=False)
                 continue
             # Step 3: Submit to Deadline
             try:
@@ -2262,7 +2260,7 @@ class AppDialog(QtGui.QWidget):
         output_file_name = output_module.file.name
         output_folder = os.path.dirname(output_file_name)
         ae_project_name = os.path.basename(self.adobe.app.project.file.name)
-        job_name = f"{self.project_name} - {ae_project_name} - {render_queue_item.comp.name}"
+        job_name = f"{self.project_name} - {ae_project_name} - {render_queue_item.comp.name} - {output_module.name}"
         start_frame = ""
         end_frame = ""
         frame_list = deadline_settings.get('frame_list', "")
@@ -2319,8 +2317,8 @@ class AppDialog(QtGui.QWidget):
             "FailureDetectionTaskErrors": deadline_settings.get('failure_detection_task_errors', 8),
             "FailureDetectionJobErrors": deadline_settings.get('failure_detection_job_errors', 20),
         }
-        if dependent_comps:
-            job_attrs["BatchName"] = f"{self.project_name} - {ae_project_name}"
+        #if dependent_comps:
+        job_attrs["BatchName"] = f"{self.project_name} - {ae_project_name}"
 
         # Blacklist/Whitelist
         if deadline_settings.get('submit_allow_list_as_deny_list', False):
@@ -2552,8 +2550,21 @@ class AppDialog(QtGui.QWidget):
     # Threaded functions
     ########################################
     def submit_to_deadline_threaded(self):
+        comp_rows = []
+        comp_names = []
+        row_to_progress_idx = {}
+        for idx, row in enumerate(range(self.ui.compTableWidget.rowCount())):
+            item = self.ui.compTableWidget.item(row, 0)
+            includeCheckBox = self.ui.compTableWidget.item(row, 6)
+            if item and includeCheckBox and includeCheckBox.checkState() == QtCore.Qt.Checked:
+                comp_rows.append(row)
+                comp_names.append(item.text())
+                row_to_progress_idx[row] = len(comp_rows) - 1
+        self.deadline_progress_dialog = DeadlineProgressDialog(comp_names, logger=logger, parent=self)
+        self.deadline_progress_dialog.show()
+
         self.thread = QtCore.QThread()
-        self.worker = DeadlineSubmissionWorker(self)
+        self.worker = DeadlineSubmissionWorker(self, comp_rows, row_to_progress_idx)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.on_submission_progress)
@@ -2562,30 +2573,30 @@ class AppDialog(QtGui.QWidget):
         self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
         self.worker.item_update.connect(self.on_submission_item_update)
+        self.worker.row_progress.connect(self.deadline_progress_dialog.update_progress)
+        self.worker.row_done.connect(self.deadline_progress_dialog.mark_done)
         self.thread.start()
 
     def on_submission_item_update(self, row, message, success=True):
         statusItem = self.ui.compTableWidget.item(row, 1)
-        if statusItem is not None:
-            if success:
-                statusItem.setIcon(self.ui.submitIcon)
-                statusItem.setToolTip(message or "Submitted to Deadline")
-            else:
-                statusItem.setIcon(self.ui.errorIcon)
-                statusItem.setToolTip(message or "Submission Failed")
+        if statusItem is None:
+            statusItem = QtGui.QTableWidgetItem("")
+            self.ui.compTableWidget.setItem(row, 1, statusItem)
+        if success:
+            statusItem.setIcon(self.ui.submitIcon)
+            statusItem.setToolTip(message or "Submitted to Deadline")
         else:
-            item = QtGui.QTableWidgetItem(message or ("Success" if success else "Failed"))
-            if success:
-                item.setIcon(self.ui.clearIcon)
-            else:
-                item.setIcon(self.ui.errorIcon)
-            self.ui.compTableWidget.setItem(row, 1, item)
+            statusItem.setIcon(self.ui.errorIcon)
+            statusItem.setToolTip(message or "Submission Failed")
 
     def on_submission_progress(self, percent, message):
         self.update_progress_bar(percent)
         self.update_progress_bar_format(message)
 
     def on_submission_finished(self, error_message, num_successful_submissions):
+        if hasattr(self, "deadline_progress_dialog") and self.deadline_progress_dialog:
+            self.deadline_progress_dialog.close()
+            self.deadline_progress_dialog = None
         self.hide_progress_bar()
         self.toggle_buttons(True)
         if error_message:
@@ -2600,10 +2611,14 @@ class DeadlineSubmissionWorker(QtCore.QObject):
     progress = QtCore.Signal(int, str)  # percent, message
     finished = QtCore.Signal(str, int)  # error message, num_successful_submissions
     item_update = QtCore.Signal(int, str, bool)  # row, message, success
+    row_progress = QtCore.Signal(int, int, str)  # row, percent, message
+    row_done = QtCore.Signal(int, bool)  # row, success
 
-    def __init__(self, parent_dialog):
+    def __init__(self, parent_dialog, comp_rows, row_to_progress_idx):
         super().__init__()
         self.dialog = parent_dialog
+        self.comp_rows = comp_rows
+        self.row_to_progress_idx = row_to_progress_idx
 
     @QtCore.Slot()
     def run(self):
@@ -2627,9 +2642,6 @@ class DeadlineSubmissionWorker(QtCore.QObject):
             if dialog.ui.compTableWidget.rowCount() == 0:
                 self.finished.emit("No render queue items available", 0)
                 return
-
-            dialog.show_progress_bar(format_text="Submitting to Deadline")
-
             current_deadline_settings = dialog.get_deadline_settings()
 
             deadline_error_message = ""
@@ -2638,9 +2650,12 @@ class DeadlineSubmissionWorker(QtCore.QObject):
             project_path = dialog.adobe.app.project.file.fsName
             num_rows = dialog.ui.compTableWidget.rowCount()
 
-            for row in range(num_rows):
+            for row in self.comp_rows:
+                progress_idx = self.row_to_progress_idx.get(row, None)
                 percent = int((row / max(1, num_rows)) * 100)
-                self.progress.emit(percent, f"Processing item {row+1} of {num_rows}")
+                if progress_idx is not None:
+                    self.row_progress.emit(progress_idx, 0, "Starting submission...")
+
                 render_queue_item = dialog.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
                 includeCheckBox = dialog.ui.compTableWidget.item(row, 6)
                 statusItem = dialog.ui.compTableWidget.item(row, 1)
@@ -2651,18 +2666,34 @@ class DeadlineSubmissionWorker(QtCore.QObject):
 
                 # Checks
                 if includeCheckBox.checkState() != QtCore.Qt.Checked:
-                    continue
-                if render_queue_item.status != dialog.adobe.RQItemStatus.QUEUED:
-                    continue
-                if render_queue_item.comp.name.startswith(" ") or render_queue_item.comp.name.endswith(" "):
-                    msg = f"Comp name has spaces at the front or back, skipping - {render_queue_item.comp.name}"
+                    msg = f"Skipped because 'Include' checkbox is not checked for comp '{render_queue_item.comp.name}'."
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
+                    continue
+
+                if render_queue_item.status != dialog.adobe.RQItemStatus.QUEUED:
+                    msg = f"Skipped because comp '{render_queue_item.comp.name}' is not in QUEUED status (status={render_queue_item.status})."
+                    deadline_error_message += msg + "\n"
+                    self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
+                    continue
+
+                if render_queue_item.comp.name.startswith(" ") or render_queue_item.comp.name.endswith(" "):
+                    msg = f"Comp name '{render_queue_item.comp.name}' has spaces at the front or back. Skipping."
+                    deadline_error_message += msg + "\n"
+                    self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
                     continue
                 if not re.match(r'^[a-zA-Z0-9_]+$', render_queue_item.comp.name):
-                    msg = f"Comp name has special characters, skipping - {render_queue_item.comp.name}"
+                    msg = f"Comp name '{render_queue_item.comp.name}' has special characters. Only letters, numbers, and underscores are allowed. Skipping."
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
                     continue
 
                 # Output folder
@@ -2671,26 +2702,33 @@ class DeadlineSubmissionWorker(QtCore.QObject):
 
                 # Step 1: Copy project file
                 try:
-                    self.progress.emit(percent, f"Copying project file for {compName}...")
+                    if progress_idx is not None:
+                        self.row_progress.emit(progress_idx, 10, f"Copying project file for {compName}...")
                     if not os.path.exists(render_scene_file_directory):
                         os.makedirs(render_scene_file_directory, exist_ok=True)
                     shutil.copy(dialog.adobe.app.project.file.fsName, render_scene_file_path)
                 except Exception as e:
-                    msg = f"Failed to create render scene backup: {render_queue_item.comp.name}"
+                    msg = f"Failed to create render scene backup for comp '{render_queue_item.comp.name}': {str(e)}"
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
                     continue
 
                 # Step 2: Generate manifest
                 try:
-                    self.progress.emit(percent, f"Generating project manifest for {compName}...")
+                    if progress_idx is not None:
+                        self.row_progress.emit(progress_idx, 30, f"Generating project manifest for {compName}...")
                     dialog.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
-                    self.progress.emit(percent, f"Generating comp manifest for {compName}...")
+                    if progress_idx is not None:
+                        self.row_progress.emit(progress_idx, 50, f"Generating comp manifest for {compName}...")
                     dialog.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
                 except Exception as e:
-                    msg = f"Failed to generate manifest file: {compName}"
+                    msg = f"Failed to generate manifest file for comp '{compName}': {str(e)}"
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
                     continue
 
                 # Step 3: Submit to Deadline
@@ -2707,19 +2745,72 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                     )
                     dialog.submit_render_queue_item_to_deadline_deadlineconnect(job_attrs, plugin_attrs)
                     num_successful_submissions += 1
-                    self.item_update.emit(row, f"Submitted to Deadline", True)
+                    self.item_update.emit(row, f"Submitted comp '{compName}' to Deadline successfully.", True)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, True)
                 except Exception as e:
-                    msg = f"Failed to submit render queue item to Deadline: {render_queue_item.comp.name}"
+                    msg = f"Failed to submit comp '{compName}' to Deadline: {str(e)}"
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
                     continue
-
             # Final progress
             self.progress.emit(100, "Finished submitting to Deadline")
-            dialog.hide_progress_bar()
             if deadline_error_message:
                 self.finished.emit(deadline_error_message, num_successful_submissions)
             else:
                 self.finished.emit("", num_successful_submissions)
         except Exception as e:
             self.finished.emit(str(e), num_successful_submissions)
+
+class DeadlineProgressDialog(QtGui.QDialog):
+    def __init__(self, comp_names, logger, parent=None):
+        super().__init__(parent)
+        self.logger = logger
+        self.setWindowTitle("Deadline Submission Progress")
+        self.setModal(True)
+        self.resize(600, 60 + 30 * len(comp_names))
+        self.layout = QtGui.QVBoxLayout(self)
+        self.progress_bars = {}
+
+        for idx, name in enumerate(comp_names):
+            row_widget = QtGui.QWidget(self)
+            row_layout = QtGui.QHBoxLayout(row_widget)
+            label = QtGui.QLabel(name, row_widget)
+            progress = QtGui.QProgressBar(row_widget)
+            progress.setMinimum(0)
+            progress.setMaximum(100)
+            progress.setValue(0)
+            progress.setTextVisible(True)
+            progress.setFormat("%p%")
+            row_layout.addWidget(label)
+            row_layout.addWidget(progress)
+            self.layout.addWidget(row_widget)
+            self.progress_bars[idx] = progress
+
+    @QtCore.Slot(int, int, str)
+    def update_progress(self, row, percent, message=""):
+        self.logger.debug(f"update_progress called: row={row}, percent={percent}, message={message}")
+        bar = self.progress_bars.get(row)
+        if bar:
+            bar.setValue(percent)
+            if message:
+                bar.setFormat(f"{message} %p%")
+            else:
+                bar.setFormat("%p%")
+        else:
+            self.logger.debug(f"No progress bar found for row {row}")
+
+    @QtCore.Slot(int, bool)
+    def mark_done(self, row, success=True):
+        self.logger.debug(f"mark_done called: row={row}, success={success}")
+        bar = self.progress_bars.get(row)
+        if bar:
+            bar.setValue(100)
+            if success:
+                bar.setFormat("Done %p%")
+            else:
+                bar.setFormat("Error %p%")
+        else:
+            self.logger.debug(f"No progress bar found for row {row}")
