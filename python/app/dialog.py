@@ -2003,7 +2003,7 @@ class AppDialog(QtGui.QWidget):
         }
         # Group Jobs into a batch
         if dependent_comps or deadline_settings.get('group_submissions', False):
-         job_attrs["BatchName"] = f"{self.project_name} - {ae_project_name}"
+            job_attrs["BatchName"] = f"{self.project_name} - {ae_project_name}"
 
         # Blacklist/Whitelist
         if deadline_settings.get('submit_allow_list_as_deny_list', False):
