@@ -864,6 +864,11 @@ class Ui_Dialog(object):
         self.deadline_machine_list_deny.setObjectName("machine_list_deny")
         self.deadline_machine_list_deny.setToolTip("Machine List is a Deny List")
 
+        # Group Submissions
+        self.deadline_group_submissions = QtGui.QCheckBox("Group Submissions")
+        self.deadline_group_submissions.setObjectName("group_submissions")
+        self.deadline_group_submissions.setToolTip("Group Submissions Together Under Scene Name")
+
         # Main Layout for the deadline base settings
         self.deadlineBaseSettingsLayout = QtGui.QHBoxLayout()
 
@@ -904,6 +909,7 @@ class Ui_Dialog(object):
         self.deadlineBaseSettingsFormLayout3.addRow("Comment:", self.deadline_comment)
         self.deadlineBaseSettingsFormLayout3.addRow("", self.deadline_submit_as_suspended)
         self.deadlineBaseSettingsFormLayout3.addRow("", self.deadline_machine_list_deny)
+        self.deadlineBaseSettingsFormLayout3.addRow("", self.deadline_group_submissions)
 
         # Add the column layouts to the main layout
         self.deadlineBaseSettingsLayout.addLayout(self.deadlineBaseSettingsFormLayout1)
