@@ -44,7 +44,7 @@ function logError(msg) {
         if (app.project && app.project.file && app.project.file.parent) {
             logFile = new File(app.project.file.parent.fsName + "/ae_manifest_error.log");
         } else {
-            logFile = new File(Folder.myDocuments + "/ae_manifest_error.log");
+            logFile = new File(Folder.myDocuments.fsName + "/ae_manifest_error.log");
         }
         if (logFile.open("a")) {
             logFile.writeln((new Date()).toISOString() + " - " + msg);

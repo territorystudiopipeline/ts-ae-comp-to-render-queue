@@ -5,13 +5,15 @@ function logError(msg) {
         if (app.project && app.project.file && app.project.file.parent) {
             logFile = new File(app.project.file.parent.fsName + "/ae_manifest_error.log");
         } else {
-            logFile = new File(Folder.myDocuments + "/ae_manifest_error.log");
+            logFile = new File(Folder.myDocuments.fsName + "/ae_manifest_error.log");
         }
         if (logFile.open("a")) {
             logFile.writeln((new Date()).toISOString() + " - " + msg);
             logFile.close();
         }
-    } catch (e) {}
+    } catch (e) {
+        // If logging fails, there's not much we can do, but we don't want to throw an error from the logger itself
+    }
 }
 
 // Safe file writing helper
@@ -96,12 +98,14 @@ function getCompOutputLocationsFromJson() {
             try {
                 var jsonStr = jsonFile.read();
                 var compsList = JSON.parse(jsonStr);
-                for (var i = 0; i < compsList.length; i++) {
-                    var entry = compsList[i];
-                    if (entry.name && entry.output_location) {
-                        compOutputMap[entry.name] = entry.output_location;
+                if (compsList && compsList.length) {
+                    for (var i = 0; i < compsList.length; i++) {
+                        var entry = compsList[i];
+                        if (entry.name && entry.output_location) {
+                            compOutputMap[entry.name] = entry.output_location;
+                        }
                     }
-                }
+                    }
             } catch (e) {
                 logError("Failed to parse comp identifiers JSON: " + e.toString());
                 if (DEBUG) alert("Failed to parse comp identifiers JSON: " + e);
@@ -178,7 +182,7 @@ function collectManifestData(comp, manifestCache, sceneFilePath) {
             native_effects: [],
             third_party_effects: []
         },
-        nested_comps: [],
+        nested_comps: []
     };
     for (var i = 1; i <= comp.numLayers; i++) {
         var layer = comp.layer(i);
@@ -189,7 +193,7 @@ function collectManifestData(comp, manifestCache, sceneFilePath) {
                 comp_id: null
             });
             if (nestedComp) {
-                var nestedManifest = collectManifestData(nestedComp, manifestCache);
+                var nestedManifest = collectManifestData(nestedComp, manifestCache, sceneFilePath);
                 for (var f = 0; f < nestedManifest.fonts.length; f++) {
                     if (!containsFont(manifest.fonts, nestedManifest.fonts[f])) {
                         manifest.fonts.push(nestedManifest.fonts[f]);
@@ -290,7 +294,10 @@ function getProjectManifestOutputFolder() {
             if (compsList.length && compsList[0].output_location) {
                 return compsList[0].output_location;
             }
-        } catch (e) {}
+        } catch (e) {
+            logError("Failed to parse comp identifiers JSON for manifest output location: " + e.toString());
+            if (DEBUG) alert("Failed to parse comp identifiers JSON for manifest output location: " + e);
+        }
         jsonFile.close();
     }
     return projectFolder.fsName;

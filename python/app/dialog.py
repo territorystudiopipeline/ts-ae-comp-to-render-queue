@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import warnings
 import functools
+
 import sgtk
 import os
 import re
@@ -103,6 +104,7 @@ class AppDialog(QtGui.QWidget):
         self.deadline_defaults = self._app.get_setting('deadline_defaults')
         self.deadline_host = self._app.get_setting('deadline_host')
         self.deadline_port = self._app.get_setting('deadline_port')
+        self.qsettings_ignore_list = self._app.get_setting('qsettings_ignore_list')
         self.render_preset_movie_formats = self._app.get_setting('render_preset_movie_formats')
 
         # Deadline variables
@@ -453,6 +455,21 @@ class AppDialog(QtGui.QWidget):
             self.create_table_entries()
             self.toggle_buttons()
 
+    def refresh_table_item_data(self):
+        """
+        Refresh only the UserRole data for each table row, preserving status icons/tooltips.
+        """
+        for row in range(self.ui.compTableWidget.rowCount()):
+            try:
+                # Fetch the latest render queue item for this row
+                render_queue_item = self.adobe.app.project.renderQueue.item(row + 1)
+                # Update the UserRole data for the first column (comp name)
+                tableItem = self.ui.compTableWidget.item(row, 0)
+                if tableItem is not None:
+                    tableItem.setData(QtCore.Qt.UserRole, render_queue_item)
+            except Exception as e:
+                logger.error(f"Failed to refresh UserRole data for row {row}: {e}")
+
     def apply_to_render_queue_items(self):
         """
             Apply the changes to the render queue items
@@ -470,207 +487,227 @@ class AppDialog(QtGui.QWidget):
         logger.debug("Start Render Queue Items Time: %s" % time.strftime("%H:%M:%S"))
 
         logger.debug("Applying to render queue items")
-        # Check if there are any render queue items
-        if self.ui.compTableWidget.rowCount() == 0:
-            self.alert_box("No render queue items", "Please add some render queue items to apply the changes to")
-            return
+        try:
+            if self.ui.compTableWidget.rowCount() == 0:
+                self.alert_box("No render queue items", "Please add some render queue items to apply the changes to")
+                return
 
-        # Show the progress bar
-        self.show_progress_bar(format_text="Applying to render queue items...")
-
-        # Get the render queue items from the table
-        count = 0
-        for row in range(self.ui.compTableWidget.rowCount()):
-            tableItem = self.ui.compTableWidget.item(row, 0)
-            statusItem = self.ui.compTableWidget.item(row, 1)
-            frameRangeComboBox = self.ui.compTableWidget.cellWidget(row, 3)
-            renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
-            useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
-            includeCheckBox = self.ui.compTableWidget.item(row, 6)
-
-            # Emit progress
-            self.update_progress_bar(int(row / self.ui.compTableWidget.rowCount() * 100))
-
-            # Check if the item is checked
-            if includeCheckBox.checkState() == QtCore.Qt.Checked:
-                render_queue_item = tableItem.data(QtCore.Qt.UserRole)
-                comp = render_queue_item.comp
-                compName = comp.name
-                templateName = renderFormatDropdown.currentText()
-                render_queue_template = self.get_render_queue_template(row)
-                frame_range = self.get_frame_range(comp, row)
-
-                # Check if the frame range is valid
-                if frame_range[0] is None or frame_range[1] is None:
-                    logger.debug("Bad frame range, skipping %s" % comp.name)
-                    self.alert_box("Bad frame range", "Please check the frame range for %s, Skipping" % comp.name)
-
-                    # Update the status icon
-                    statusItem.setIcon(self.ui.errorIcon)
-                    statusItem.setToolTip("Template Not Applied | Error - Bad Frame Range")
-                    includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                    continue
-
-                # Check the template actually exists
-                if not self.check_template_exists(comp, frame_range, render_queue_template, templateName):
-                    self.alert_box("Error", "Something went wrong applying or locating an output template")
-
-                    # Leave these debug messages for troubleshooting
-                    logger.debug("Error applying template %s" % templateName)
-                    logger.debug(render_queue_template)
-
-                    # Update the status icon
-                    statusItem.setIcon(self.ui.errorIcon)
-                    statusItem.setToolTip("Template Not Applied | Error - Template Not Found")
-                    includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                    continue
-
-                try:
-                    render_queue_item.outputModule(render_queue_item.numOutputModules).applyTemplate(templateName)
-                except:
-                    self.alert_box("Error",
-                                   "There's some kind of issue with this template\n\n" + str(templateName) + '\n' + str(
-                                       render_queue_template))
-                    logger.debug("Error applying template %s" % templateName)
-                    # Update the status icon
-                    statusItem.setIcon(self.ui.errorIcon)
-                    statusItem.setToolTip("Template Not Applied | Error")
-                    includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                    continue
-
-                # Check current time span
-                timespan = render_queue_item.getSetting("Time Span")
-                logger.debug("Time Span: %s" % timespan)
-
-                # Set the render to the start/end times
-                if frameRangeComboBox.currentText() == self.COMP_TEXT:
-                    if timespan == 0:
-                        pass
-                    else:
-                        render_queue_item.setSetting("Time Span", 0)
-                        logger.debug("Setting time span to comp frame range")
-
-                elif frameRangeComboBox.currentText() == self.WORK_AREA_TEXT:
-                    if timespan == 1:
-                        pass
-                    else:
-                        render_queue_item.setSetting("Time Span", 1)
-                        logger.debug("Setting time span to work area frame range")
-
-                elif frameRangeComboBox.currentText() == self.CUSTOM_TEXT:
-                    render_queue_item.timeSpanStart = frame_range[0]
-                    render_queue_item.timeSpanDuration = frame_range[1] - frame_range[0]
-                    logger.debug("Setting time span to custom frame range")
-
-                elif frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
-                    render_queue_item.timeSpanStart = frame_range[0]
-                    render_queue_item.timeSpanDuration = comp.frameDuration * 1
-                    logger.debug("Setting time span to single frame")
-
-                if useCompNameCheckBox.checkState() == QtCore.Qt.Checked:
-                    use_comp_name = True
-                else:
-                    use_comp_name = False
-                logger.debug("Use Comp Name: %s" % use_comp_name)
-
-                # Grab the output folder from templates
-                outputLocation = self.get_shotgrid_template(render_queue_template, use_comp_name, compName)
-
-                # Create the output folder if it doesn't already exist
-                folderPath = os.path.dirname(outputLocation)
-                if not os.path.exists(folderPath):
-                    os.makedirs(folderPath)
-
-                # Debugging
-                logger.debug("Output location: %s" % outputLocation)
-                logger.debug("Output folder: %s" % folderPath)
-                logger.debug("Comp Name: %s" % comp.name)
-
-                # If Single Frame is selected, Remove the frame range from the output location
-                if frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
-                    # Remove .[####]. from the output location
-                    outputLocation = re.sub(r'\.\[?\#*\]?\.*', '.', outputLocation)
-
-                # Set the filepath and name on the newly created output module
-                # Do it twice because it sometimes fails the first time - Sean
-                with self.supress_dialogs():
-                    render_queue_item.outputModule(render_queue_item.numOutputModules).file = self.adobe.File(
-                        outputLocation)
-                    render_queue_item.outputModule(render_queue_item.numOutputModules).file = self.adobe.File(
-                        outputLocation)
-
-                # Log
-                logger.debug("Render Queue Item for: %s has been updated" % render_queue_item.comp.name)
-                count += 1
-
-                # Update the status icon
+            self.show_progress_bar(format_text="Applying to render queue items...")
+            count = 0
+            total_rows = self.ui.compTableWidget.rowCount()
+            for row in range(total_rows):
+                tableItem = self.ui.compTableWidget.item(row, 0)
                 statusItem = self.ui.compTableWidget.item(row, 1)
-                statusItem.setIcon(self.ui.clearIcon)
-                statusItem.setToolTip("Template Applied | Ready to Render")
+                frameRangeComboBox = self.ui.compTableWidget.cellWidget(row, 3)
+                renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
+                useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
+                includeCheckBox = self.ui.compTableWidget.item(row, 6)
 
-        # Show progress at 100%
-        self.update_progress_bar(100)
-        time.sleep(0.2)
-        self.hide_progress_bar()
+                compName = tableItem.text() if tableItem else f"Row {row+1}"
+                progress = int((row / total_rows) * 100)
+                self.show_progress_bar(format_text=f"Applying: {compName} ({row+1}/{total_rows})")
+                self.update_progress_bar(progress)
 
-        self.toggle_buttons()
+                # Per-comp steps for secondary progress bar
+                comp_steps = [
+                    "Frame range check",
+                    "Template check",
+                    "Apply template",
+                    "Set time span/output location"
+                ]
+                num_steps = len(comp_steps)
+                self.show_progress_bar(format_text=f"{compName}: {comp_steps[0]}", max=num_steps, primary=False)
+                self.update_progress_bar(0, primary=False)
+                step_idx = 0
 
-        # Debugging time stamp for testing HH:MM:SS
-        logger.debug("Finish Time: %s" % time.strftime("%H:%M:%S"))
-        logger.debug("Total Time: %s" % (time.time() - self.start_time))
-        logger.debug("Total Render Queue Items Updated: %s" % count)
+                if includeCheckBox.checkState() == QtCore.Qt.Checked:
+                    try:
+                        render_queue_item = tableItem.data(QtCore.Qt.UserRole)
+                        comp = render_queue_item.comp
 
-    @deprecated("This method is deprecated and will be removed in a future version. "
-                "Please use generate_manifest_file_for_queue_item_jsx instead.")
-    def generate_manifest_file_for_queue_item(self, render_queue_item, render_scene_file_path):
-        """
-            Generate a manifest file (json) for the render queue item that records
-            fonts and plugins/effects used in the render comp.
+                        # Defensive type check for comp
+                        if not hasattr(comp, 'name'):
+                            logger.error(f"Row {row}: comp is not a valid comp object. Type: {type(comp)}, Value: {comp}")
+                            statusItem.setIcon(self.ui.errorIcon)
+                            statusItem.setToolTip("Template Not Applied | Error - Invalid comp object")
+                            includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                            self.hide_progress_bar(primary=False)
+                            continue
 
-            If there are nested comps, the manifest will also include the fonts and plugins/effects used in those nested comps.
+                        compName = comp.name
+                        templateName = renderFormatDropdown.currentText()
+                        render_queue_template = self.get_render_queue_template(row)
+                        frame_range = self.get_frame_range(comp, row)
 
-            Arguments:
-                render_queue_item: The render queue item to generate the manifest for
-                render_scene_file_path: The path to the render scene file to be rendered
-        """
+                        # Step 1: Frame range check
+                        self.update_progress_bar_format(f"{compName}: {comp_steps[0]}", primary=False)
+                        if frame_range[0] is None or frame_range[1] is None:
+                            logger.debug("Bad frame range, skipping %s" % comp.name)
+                            self.alert_box("Bad frame range", f"Please check the frame range for {comp.name}, Skipping")
+                            statusItem.setIcon(self.ui.errorIcon)
+                            statusItem.setToolTip("Template Not Applied | Error - Bad Frame Range")
+                            includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                            self.hide_progress_bar(primary=False)
+                            continue
+                        step_idx += 1
+                        self.update_progress_bar(step_idx, primary=False)
 
-        comp = render_queue_item.comp
+                        # Step 2: Template check
+                        self.update_progress_bar_format(f"{compName}: {comp_steps[1]}", primary=False)
 
-        comp_identifier = (comp.name, getattr(comp, 'id', None))
-        if comp_identifier in self._manifest_cache:
-            manifest_data = self._manifest_cache[comp_identifier].copy()
-        else:
-            manifest_data = {
-                "scene_name": self.adobe.app.project.file.name,
-                "scene_file": render_scene_file_path,
-                "comp_name": comp.name,
-                "comp_id": getattr(comp, 'id', None),
-                "comp_frame_rate": comp.frameRate,
-                "comp_duration": comp.duration,
-                "nested_comps": [],
-                "fonts": set(),
-                "effects": {
-                    "native_effects": set(),
-                    "third_party_effects": set()
-                }
-            }
-            manifest_data = self.get_fonts_and_plugins_for_comp(comp, manifest_data)
-            self._manifest_cache[comp_identifier] = manifest_data.copy()
+                        if not self.check_template_exists(render_queue_item, frame_range, render_queue_template, templateName):
 
-        # Convert the sets to lists for json serialization
-        manifest_data["fonts"] = [
-            {"name": f[0], "family": f[1], "style": f[2]} for f in manifest_data["fonts"]
-        ]
-        manifest_data["effects"] = {
-            "native_effects": [{"name": n[0], "matchName": n[1]} for n in manifest_data["effects"]["native_effects"]],
-            "third_party_effects": [{"name": t[0], "matchName": t[1]} for t in manifest_data["effects"]["third_party_effects"]]
-        }
+                            self.alert_box("Error", "Something went wrong applying or locating an output template")
 
-        # Save the manifest data to a json file in the same location as the render scene file
-        manifest_file_path = os.path.splitext(render_scene_file_path)[0] + "_manifest.json"
+                            logger.debug("Error applying template %s" % templateName)
+                            logger.debug(render_queue_template)
+                            statusItem.setIcon(self.ui.errorIcon)
+                            statusItem.setToolTip("Template Not Applied | Error - Template Not Found")
+                            includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                            self.hide_progress_bar(primary=False)
+                            continue
 
-        with open(manifest_file_path, "w") as manifest_file:
-            json.dump(manifest_data, manifest_file, indent=4)
+                        step_idx += 1
+                        self.update_progress_bar(step_idx, primary=False)
+
+                        # Step 3: Apply template
+                        self.update_progress_bar_format(f"{compName}: {comp_steps[2]}", primary=False)
+                        try:
+                            try:
+                                # Refetch item and comp to make sure its note a stale reference
+                                render_queue_item = self.adobe.app.project.renderQueue.item(row + 1)
+                                comp = render_queue_item.comp
+
+                            except Exception as refetch_exc:
+                                logger.error("Failed to re-fetch render_queue_item: %s" % str(refetch_exc))
+                                statusItem.setIcon(self.ui.errorIcon)
+                                statusItem.setToolTip("Template Not Applied | Error - Could not re-fetch render_queue_item")
+                                includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                                self.hide_progress_bar(primary=False)
+                                continue
+
+                            outputModuleAttr = getattr(render_queue_item, "outputModule", None)
+                            if not callable(outputModuleAttr):
+                                logger.error("render_queue_item.outputModule is not callable after refresh! Type: %s, Value: %s" % (type(outputModuleAttr), outputModuleAttr))
+                                statusItem.setIcon(self.ui.errorIcon)
+                                statusItem.setToolTip("Template Not Applied | Error - outputModule not callable after refresh")
+                                includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                                self.hide_progress_bar(primary=False)
+                                continue
+
+                            if templateName in render_queue_item.outputModule(1).templates:
+                                logger.debug("Applying template %s to comp %s" % (templateName, comp.name))
+                                render_queue_item.outputModule(1).applyTemplate(templateName)
+                            else:
+                                logger.error("Template %s not found in output module templates after refresh" % templateName)
+                                raise Exception("Template %s not found in output module templates after refresh" % templateName)
+
+                        except Exception as e:
+                            self.alert_box("Error",
+                                           "There's some kind of issue with this template\n\n" + str(templateName) + '\n' + str(
+                                               render_queue_template))
+                            logger.debug("Error applying template %s" % templateName)
+                            logger.debug("Exception: %s" % str(e))
+                            logger.debug(traceback.format_exc())
+                            statusItem.setIcon(self.ui.errorIcon)
+                            statusItem.setToolTip("Template Not Applied | Error")
+                            includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                            self.hide_progress_bar(primary=False)
+                            continue
+
+                        step_idx += 1
+                        self.update_progress_bar(step_idx, primary=False)
+
+                        # Step 4: Time span and output location
+                        self.update_progress_bar_format(f"{compName}: {comp_steps[3]}", primary=False)
+                        timespan = render_queue_item.getSetting("Time Span")
+                        logger.debug("Time Span: %s" % timespan)
+
+                        if frameRangeComboBox.currentText() == self.COMP_TEXT:
+                            if timespan == 0:
+                                pass
+                            else:
+                                render_queue_item.setSetting("Time Span", 0)
+                                logger.debug("Setting time span to comp frame range")
+
+                        elif frameRangeComboBox.currentText() == self.WORK_AREA_TEXT:
+                            if timespan == 1:
+                                pass
+                            else:
+                                render_queue_item.setSetting("Time Span", 1)
+                                logger.debug("Setting time span to work area frame range")
+
+                        elif frameRangeComboBox.currentText() == self.CUSTOM_TEXT:
+                            render_queue_item.timeSpanStart = frame_range[0]
+                            render_queue_item.timeSpanDuration = frame_range[1] - frame_range[0]
+                            logger.debug("Setting time span to custom frame range")
+
+                        elif frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
+                            render_queue_item.timeSpanStart = frame_range[0]
+                            render_queue_item.timeSpanDuration = comp.frameDuration * 1
+                            logger.debug("Setting time span to single frame")
+
+                        if useCompNameCheckBox.checkState() == QtCore.Qt.Checked:
+                            use_comp_name = True
+                        else:
+                            use_comp_name = False
+                        logger.debug("Use Comp Name: %s" % use_comp_name)
+
+                        outputLocation = self.get_shotgrid_template(render_queue_template, use_comp_name, compName)
+                        folderPath = os.path.dirname(outputLocation)
+                        if not os.path.exists(folderPath):
+                            os.makedirs(folderPath)
+
+                        logger.debug("Output location: %s" % outputLocation)
+                        logger.debug("Output folder: %s" % folderPath)
+                        logger.debug("Comp Name: %s" % comp.name)
+
+                        if frameRangeComboBox.currentText() == self.SINGLE_FRAME_TEXT:
+                            outputLocation = re.sub(r'\.\[?\#*\]?\.*', '.', outputLocation)
+
+                        with self.supress_dialogs():
+                            render_queue_item.outputModule(render_queue_item.numOutputModules).file = self.adobe.File(
+                                outputLocation)
+                            render_queue_item.outputModule(render_queue_item.numOutputModules).file = self.adobe.File(
+                                outputLocation)
+
+                        step_idx += 1
+                        self.update_progress_bar(step_idx, primary=False)
+
+                        logger.debug("Render Queue Item for: %s has been updated" % render_queue_item.comp.name)
+                        count += 1
+                        statusItem = self.ui.compTableWidget.item(row, 1)
+                        statusItem.setIcon(self.ui.clearIcon)
+                        statusItem.setToolTip("Template Applied | Ready to Render")
+
+                    except Exception as item_exc:
+                        logger.error(f"Exception while applying to row {row}: {item_exc}")
+                        logger.error(traceback.format_exc())
+                        statusItem.setIcon(self.ui.errorIcon)
+                        statusItem.setToolTip("Template Not Applied | Error (row exception)")
+                        includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+                        self.hide_progress_bar(primary=False)
+                        continue
+
+                self.hide_progress_bar(primary=False)
+
+            self.update_progress_bar(100)
+            time.sleep(0.2)
+
+        except Exception as main_exc:
+            logger.error(f"Exception in apply_to_render_queue_items: {main_exc}")
+            logger.error(traceback.format_exc())
+
+        finally:
+            self.hide_progress_bar()
+            # Refresh only the UserRole data for each row, preserving status icons/tooltips
+            self.refresh_table_item_data()
+            self.toggle_buttons()
+
+            logger.debug("Table item data refreshed after apply.")
+            logger.debug("Finish Time: %s" % time.strftime("%H:%M:%S"))
+            logger.debug("Total Time: %s" % (time.time() - self.start_time))
+            logger.debug("Total Render Queue Items Updated: %s" % count)
 
     def _run_jsx_manifest_generation(self, comp_identifiers, jsx_script_path):
         """
@@ -752,11 +789,19 @@ class AppDialog(QtGui.QWidget):
             return
 
         command = [afterfx_path, "-ro", jsx_script_path]
+
+        logger.info(f"Running command: {command}")
+
         try:
-            subprocess.run(command, check=True)
+            result = subprocess.run(command, check=True, capture_output=True, text=True)
+            if result.returncode != 0:
+                logger.error(f"JSX script exited with non-zero code: {result.returncode}", file=sys.stderr)
+                logger.error(f"Stdout: {result.stdout}", file=sys.stderr)
+                logger.error(f"Stderr: {result.stderr}", file=sys.stderr)
         except subprocess.CalledProcessError as e:
             logger.error(f"JSX script failed to execute: {e}", file=sys.stderr)
-            logger.error(f"{e.stderr}", file=sys.stderr)
+            logger.error(f"Stdout: {e.stdout}", file=sys.stderr)
+            logger.error(f"Stderr: {e.stderr}", file=sys.stderr)
         except OSError as e:
             logger.error(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
             logger.error(f"Command: {' '.join(command)}")
@@ -805,135 +850,6 @@ class AppDialog(QtGui.QWidget):
             return
 
         self._run_jsx_manifest_generation([comp_identifier], jsx_script_path)
-
-    def get_fonts_and_plugins_for_comp(self, comp, manifest_data=None):
-        """
-            Collects fonts and plugins/effects used in the comp and nested comps.
-
-            Args:
-                comp: The comp to get the fonts and plugins/effects for.
-                manifest_data: The manifest data to add the fonts and plugins/effects to. If None, initializes a new dict.
-                visited_comps: Set of comp identifiers already processed to avoid redundant recursion.
-
-            Returns:
-                dict: The manifest data with the fonts and plugins/effects added.
-        """
-        if manifest_data is None:
-            manifest_data = {
-                "fonts": set(),
-                "effects": {
-                    "native_effects": set(),
-                    "third_party_effects": set()
-                },
-                "nested_comps": []
-            }
-
-        if "nested_comps" not in manifest_data:
-            manifest_data["nested_comps"] = []
-
-        # Use comp name and id as a unique identifier for the comp to prevent redundant processing
-        comp_identifier = (comp.name, getattr(comp, 'id', None))
-        # Use cache to prevent redundant analysis and recursion
-        if comp_identifier in self._manifest_cache:
-            cached = self._manifest_cache[comp_identifier]
-            manifest_data["fonts"].update(cached["fonts"])
-            manifest_data["effects"]["native_effects"].update(cached["effects"]["native_effects"])
-            manifest_data["effects"]["third_party_effects"].update(cached["effects"]["third_party_effects"])
-            for nc in cached.get("nested_comps", []):
-                if nc not in manifest_data["nested_comps"]:
-                    manifest_data["nested_comps"].append(nc)
-            return manifest_data
-
-        # Only add to nested_comps if not the root comp and not already present
-        if manifest_data.get("comp_name") != comp.name:
-            if comp_identifier not in [(c["comp_name"], c["comp_id"]) for c in manifest_data["nested_comps"]]:
-                manifest_data["nested_comps"].append({
-                    "comp_name": comp.name,
-                    "comp_id": getattr(comp, 'id', None)
-                })
-
-        def collect_effects_on_layer(layer, manifest_data):
-            """
-                Collects the plugins/effects used on a layer and adds them to the manifest data
-
-                Arguments:
-                    layer: The layer to collect the plugins/effects from
-                    manifest_data: The manifest data to add the plugins/effects to
-            """
-            effects = []
-            num_of_properties = layer.numProperties
-            for p in range(1, num_of_properties + 1):
-                property = layer.property(p)
-
-                if property and property.matchName == "ADBE Effect Parade":
-                    num_of_effects = property.numProperties
-                    logger.debug("Number of effects on layer: %s" % num_of_effects)
-
-                    for e in range(1, num_of_effects + 1):
-                        effect = property.property(e)
-                        effect_name = getattr(effect, "name", None)
-                        effect_match_name = getattr(effect, 'matchName', None)
-
-                        # Here we classify the effect as native_effects or third party based on the match name
-                        if effect_match_name.startswith("ADBE") or effect_match_name.startswith("CC"):
-                            manifest_data["effects"]["native_effects"].add((effect_name, effect_match_name))
-
-                        else:
-                            manifest_data["effects"]["third_party_effects"].add((effect_name, effect_match_name))
-
-                        logger.debug("Added effect to manifest: %s" % effect_name)
-
-        num_of_layers = comp.numLayers
-        logger.debug("Getting fonts and plugins/effects for comp: %s, Number of layers: %s" % (comp.name, num_of_layers))
-        self.show_progress_bar(format_text="Processing layers for comp %s..." % (comp.name), primary=False, max=num_of_layers)
-
-        for i, layer in enumerate(self._app.engine.iter_collection(comp.layers), start=1):
-            self.update_progress_bar(int(i), primary=False)
-            logger.debug("Checking layer %s of %s" % (i, num_of_layers))
-
-            logger.debug("Layer: %s" % layer)
-            layer_source = layer.source
-            logger.debug("Source: %s" % layer_source)
-
-            if self._app.engine.is_item_of_type(layer_source, "CompItem"):
-                nested_comp = layer_source
-                logger.debug("Found nested comp: %s" % nested_comp.name)
-                collect_effects_on_layer(layer, manifest_data)
-                self.get_fonts_and_plugins_for_comp(nested_comp, manifest_data)
-
-            elif self._app.engine.is_item_of_type(layer, "TextLayer"):
-                logger.debug("Found text layer: %s" % layer.name)
-                text_source = layer.property("Source Text")
-                num_keys = text_source.numKeys
-
-                if num_keys > 0:
-                    logger.debug("Text source is animated, number of keyframes: %s" % num_keys)
-
-                    for key_index in range(1, num_keys + 1):
-                        text_document = text_source.keyValue(key_index)
-                        font = text_document.font
-                        font_family = getattr(text_document, 'fontFamily', None)
-                        font_style = getattr(text_document, 'fontStyle', None)
-                        logger.debug("Added font from keyframe %s: %s, %s, %s" % (key_index, font, font_family, font_style))
-                        manifest_data["fonts"].add((font, font_family, font_style))
-                else:
-                    logger.debug("Text source is not animated, getting font from static value")
-                    text_document = text_source.value
-                    font = text_document.font
-                    font_family = getattr(text_document, 'fontFamily', None)
-                    font_style = getattr(text_document, 'fontStyle', None)
-                    logger.debug("Added font: %s, %s, %s" % (font, font_family, font_style))
-                    manifest_data["fonts"].add((font, font_family, font_style))
-                collect_effects_on_layer(layer, manifest_data)
-
-            else:
-                collect_effects_on_layer(layer, manifest_data)
-
-        self.hide_progress_bar(primary=False)
-
-        # After analysis, cache the result
-        self._manifest_cache[comp_identifier] = manifest_data.copy()
-        return manifest_data
 
     def process_queue_items_for_render(self):
         """
@@ -984,7 +900,6 @@ class AppDialog(QtGui.QWidget):
         self.show_progress_bar(format_text="Processing render queue items...")
 
         count = 0
-        project_manifest_created = False
 
         for row in range(num_items):
             tableItem = self.ui.compTableWidget.item(row, 0)
@@ -1025,38 +940,30 @@ class AppDialog(QtGui.QWidget):
 
                 self.update_progress_bar(int(current_step / total_steps * 100))
 
-                # try:
-                #
-                #     if not project_manifest_created:
-                #         logger.debug("Generating project manifest file...")
-                #         self.update_progress_bar_format(f"Generating project manifest for {compName}...")
-                #         # Generate a project manifest file for all comps in the project through jsx
-                #         self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
-                #         project_manifest_created = True
-                #         logger.debug("Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-                #
-                #     logger.debug("Generating manifest file for render queue item: %s" % render_queue_item.comp.name)
-                #     self.update_progress_bar_format(f"Generating comp manifest for {compName}...")
-                #
-                #     # Using the jsx method for manifest generation as it is significantly faster than the python method
-                #     #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
-                #
-                #     # Generate through jsx
-                #     self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
-                #     logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-                #
-                # except Exception as e:
-                #     logger.error("Failed to generate manifest file: %s" % e)
-                #     error = traceback.format_exc()
-                #     logger.error("%s" % error)
-                #     self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
-                #
-                #     # Update the status icon
-                #     statusItem.setIcon(self.ui.errorIcon)
-                #     statusItem.setToolTip("Error - Failed to generate manifest file")
-                #     includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                #
-                #     continue
+                try:
+                    logger.debug("Generating project manifest file...")
+
+                    self.update_progress_bar_format(f"Generating project manifest for {compName}...")
+                    self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                    logger.debug("Project manifest file generated for render queue item: %s" % compName)
+
+
+                    logger.debug("Generating manifest file for render queue item: %s" % compName)
+                    self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
+                    logger.debug("Manifest file generated for render queue item: %s" % compName)
+
+                except Exception as e:
+                    logger.error("Failed to generate manifest file: %s" % e)
+                    error = traceback.format_exc()
+                    logger.error("%s" % error)
+                    self.deadline_error_message += "Failed to generate manifest file: %s\n" % compName
+
+                    # Update the status icon
+                    statusItem.setIcon(self.ui.errorIcon)
+                    statusItem.setToolTip("Error - Failed to generate manifest file")
+                    includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
+
+                    continue
 
                 self.update_progress_bar(int(current_step / total_steps * 100))
 
@@ -1438,40 +1345,45 @@ class AppDialog(QtGui.QWidget):
 
         return outputPath
 
-    def check_template_exists(self, comp, frame_range, render_queue_template, templateName):
+    def check_template_exists(self, render_queue_item, frame_range, render_queue_template, templateName):
         """
             Check that the template exists, if not create it
 
             Arguments:
-                comp: The comp to use for creating the template if it doesn't exist
+                render_queue_item: The render queue item to check the template for
                 frame_range: The frame range to use for creating the template if it doesn't exist
                 render_queue_template: The template to use for the render queue item
                 templateName: The name of the template to check for
 
             Returns: True if the template exists or was created, False otherwise
         """
-        # Add the comp to the render queue
-        renderQueueItem = self.adobe.app.project.renderQueue.items.add(comp)
 
-        # If the output module template already exists, just apply it, otherwise import the prest project, save the new template, clean up, and then apply it
-        if templateName in renderQueueItem.outputModule(renderQueueItem.numOutputModules).templates:
-            renderQueueItem.outputModule(renderQueueItem.numOutputModules).applyTemplate(templateName)
-            renderQueueItem.remove()
+        # If the output module template already exists, just apply it, otherwise import the preset project, save the new template, clean up, and then apply it
+        if templateName in render_queue_item.outputModule(1).templates:
+            logger.debug("Template %s already exists" % templateName)
             return True
 
-        # Remove the comp from the render
-        renderQueueItem.remove()
-
         # Import the preset project
+        logger.debug("Template %s does not exist, importing preset project to create template" % templateName)
         importedProject = self.import_preset_project(render_queue_template)
+
+        if not importedProject:
+            logger.debug("Failed to import preset project for template: %s" % templateName)
+            return False
+
+        logger.debug("Preset project imported for template: %s" % templateName)
 
         # Get preset render queue item
         presetRenderQueueItem = self.find_render_queue_item_by_comp_name('PRESET')
         if presetRenderQueueItem is None:
+            logger.debug("No preset render queue item found in imported project")
             return False
 
-        presetRenderQueueItem.outputModule(presetRenderQueueItem.numOutputModules).saveAsTemplate(templateName)
+        presetRenderQueueItem.outputModule(1).saveAsTemplate(templateName)
+        logger.debug("Template %s has been created" % templateName)
+
         importedProject.remove()
+        logger.debug("Removed imported project after creating template: %s" % templateName)
 
         return True
 
@@ -1824,6 +1736,7 @@ class AppDialog(QtGui.QWidget):
                 'job_dependencies': self.ui.deadline_dependencies.get_text(),
                 'on_job_complete': self.ui.deadline_on_job_complete.currentText(),
                 'comment': self.ui.deadline_comment.text(),
+                'group_submissions' : self.ui.deadline_group_submissions.isChecked(),
             }
         except Exception as e:
             logger.error(f"Failed to get Deadline settings: {e}")
@@ -1854,6 +1767,9 @@ class AppDialog(QtGui.QWidget):
             logger.debug("Deadline settings populated")
 
             self.set_deadline_defaults()
+
+            settings = self.load_deadline_qsettings()
+            self.apply_deadline_qsettings_to_ui(settings)
 
     # Deadline Command Line Tool
     @staticmethod
@@ -1921,236 +1837,93 @@ class AppDialog(QtGui.QWidget):
             return None
 
     ####################################
+    # QSettings Functions
+    ###################################
+    def save_deadline_qsettings(self):
+        """
+            Save the Deadline settings to a QSettings file.
+        """
+        scene_path = self.adobe.app.project.file.fsName
+        settings = self.get_deadline_settings()
+        qsettings = QtCore.QSettings("Territory", "AfterEffectsDeadlineSubmission")
+        qsettings.setValue(f"deadline_settings/{scene_path}", settings)
+
+    def load_deadline_qsettings(self):
+        """
+            Load the Deadline settings from a QSettings file.
+            It first tries to load settings specific to the current scene, and if not found, it loads the last used settings.
+        """
+        scene_path = self.adobe.app.project.file.fsName
+        qsettings = QtCore.QSettings("Territory", "AfterEffectsDeadlineSubmission")
+        settings = qsettings.value(f"deadline_settings/{scene_path}")
+
+        return settings
+
+    def apply_deadline_qsettings_to_ui(self, settings):
+        """
+            Apply the loaded QSettings to the UI elements.
+            Any settings in the ignore list will not be set
+
+            Arguments:
+                settings (QSettings): The loaded QSettings object.
+        """
+        if not settings:
+            return
+
+        setters = {
+            "priority": lambda v: self.ui.deadline_priority.setText(v),
+            "pool": lambda v: self.ui.deadline_pool.setCurrentText(v),
+            "secondary_pool": lambda v: self.ui.deadline_secondary_pool.setCurrentText(v),
+            "group": lambda v: self.ui.deadline_group.setCurrentText(v),
+            "on_job_complete": lambda v: self.ui.deadline_on_job_complete.setCurrentText(v),
+            "chunk_size": lambda v: self.ui.deadline_frames_per_task.setText(v),
+            "frame_list": lambda v: self.ui.deadline_frame_list.setText(v),
+            "submit_scene": lambda v: self.ui.deadline_submit_project_file_with_job.setChecked(v),
+            "override_frame_list": lambda v: self.ui.deadline_use_frame_list_from_comp.setChecked(v),
+            "task_timeout_minutes": lambda v: self.ui.deadline_task_timeout.setText(v),
+            "concurrent_tasks": lambda v: self.ui.deadline_concurrent_tasks.setText(v),
+            "limit_groups": lambda v: self.ui.deadline_limits.set_text(v),
+            "machine_list": lambda v: self.ui.deadline_machine_list.set_text(v),
+            "submit_allow_list_as_deny_list": lambda v: self.ui.deadline_machine_list_deny.setChecked(v),
+            "submit_suspended": lambda v: self.ui.deadline_submit_as_suspended.setChecked(v),
+            "multi_machine": lambda v: self.ui.deadline_multi_machine_rendering.setChecked(v),
+            "multi_machine_tasks": lambda v: self.ui.deadline_multi_machine_number_of_machines.set_value(v),
+            "file_size": lambda v: self.ui.deadline_minimum_file_size.set_value(v),
+            "delete_files": lambda v: self.ui.deadline_delete_files_under_minimum_size.setChecked(v),
+            "memory_management": lambda v: self.ui.deadline_enable_memory_management.setChecked(v),
+            "image_cache_percentage": lambda v: self.ui.deadline_image_cache.set_value(v),
+            "max_memory_percentage": lambda v: self.ui.deadline_maximum_memory.set_value(v),
+            "use_comp_frame_list": lambda v: self.ui.deadline_use_frame_list_from_comp.setChecked(v),
+            "first_and_last": lambda v: self.ui.deadline_render_first_and_last_frames.setChecked(v),
+            "missing_layers": lambda v: self.ui.deadline_ignore_missing_layer_dependencies.setChecked(v),
+            "missing_effects": lambda v: self.ui.deadline_ignore_missing_effect_references.setChecked(v),
+            "fail_on_warnings": lambda v: self.ui.deadline_fail_on_warning_messages.setChecked(v),
+            "local_rendering": lambda v: self.ui.deadline_enable_local_rendering.setChecked(v),
+            "include_output_path": lambda v: self.ui.deadline_include_output_file_path.setChecked(v),
+            "fail_on_existing_ae_process": lambda v: self.ui.deadline_fail_on_existing_ae_process.setChecked(v),
+            "fail_on_missing_file": lambda v: self.ui.deadline_fail_on_missing_output.setChecked(v),
+            "override_fail_on_existing_ae_process": lambda v: self.ui.deadline_override_fail_on_existing_ae_process.setChecked(v),
+            "ignore_gpu_acceleration_warning": lambda v: self.ui.deadline_ignore_gpu_acceleration_warning.setChecked(v),
+            "multi_process": lambda v: self.ui.deadline_multi_process_rendering.setChecked(v),
+            "export_as_xml": lambda v: self.ui.deadline_export_xml_project_file.setChecked(v),
+            "delete_tmp_xml": lambda v: self.ui.deadline_delete_xml_file_after_export.setChecked(v),
+            "missing_footage": lambda v: self.ui.deadline_continue_on_missing_footage.setChecked(v),
+            "job_dependencies": lambda v: self.ui.deadline_dependencies.set_text(v),
+            "comment": lambda v: self.ui.deadline_comment.setText(v),
+            "group_submissions": lambda v: self.ui.deadline_group_submissions.setChecked(v),
+        }
+
+        for key, value in settings.items():
+            if key in self.qsettings_ignore_list:
+                continue
+
+            setter = setters.get(key)
+            if setter:
+                setter(value)
+
+    ####################################
     # Deadline Submission
     ####################################
-    def submit_to_deadline(self):
-        """
-            Submit the render queue items to Deadline
-        """
-        self.toggle_buttons(False)
-
-        logger.info("Submitting to Deadline")
-
-        if not self.deadline_settings_initialized:
-            logger.debug("Lazy loading Deadline settings")
-            self.populate_deadline_settings()
-
-        app_version = self.adobe.app.version
-
-        # Extract the major.minor version number
-        version = '.'.join(app_version.split('x')[0].split('.')[:2])
-
-        project_check = self.run_project_checks()
-        if not project_check:
-            self.toggle_buttons()
-            return
-
-        # If there are no rows in the table
-        if self.ui.compTableWidget.rowCount() == 0:
-            self.warning_box("No render queue items available", "Please add some render queue items or refresh the table to submit to Deadline")
-            return
-
-        logger.debug("Project Checks passed, proceeding with submission")
-
-        self.adobe.app.project.save()
-        logger.info('Project saved')
-
-        # Get Deadline Settings
-        current_deadline_settings = self.get_deadline_settings()
-        logger.debug("Deadline settings: %s" % current_deadline_settings)
-
-        # Submission variables
-        self.deadline_error_message = ""
-        total_jobs = self.ui.compTableWidget.rowCount()
-        previous_job_id = ""
-        num_successful_submissions = 0
-        project_path = self.adobe.app.project.file.fsName
-
-        self.show_progress_bar(format_text="Submitting to Deadline")
-
-        # Loop through the render queue items in the table and submit them to Deadline if they are checked
-        # and queued in the render queue
-        num_rows = self.ui.compTableWidget.rowCount()
-        project_manifest_created = False
-
-        for row in range(num_rows):
-            # Emit overall progress
-            self.update_progress_bar(int(row / num_rows * 100))
-            QtGui.QApplication.processEvents()
-            render_queue_item = self.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
-            includeCheckBox = self.ui.compTableWidget.item(row, 6)
-            statusItem = self.ui.compTableWidget.item(row, 1)
-            useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
-            compName = render_queue_item.comp.name
-            render_queue_template = self.get_render_queue_template(row)
-
-            if useCompNameCheckBox.checkState() == QtCore.Qt.Checked:
-                use_comp_name = True
-            else:
-                use_comp_name = False
-
-            logger.debug("Running render queue item Checks: %s" % render_queue_item.comp.name)
-
-            # Check if the render queue item is checked
-            if includeCheckBox.checkState() != QtCore.Qt.Checked:
-                logger.debug("Render queue item is not checked, skipping")
-                continue
-
-            # Check render queue item status
-            if render_queue_item.status != self.adobe.RQItemStatus.QUEUED:
-                logger.debug("Render queue item is not queued, skipping")
-                continue
-
-            # Check comp name for spaces trailing or leading
-            if render_queue_item.comp.name.startswith(" ") or render_queue_item.comp.name.endswith(" "):
-                logger.debug("Comp name has spaces at the front or back, skipping")
-                self.deadline_error_message += "Comp name has spaces at the front or back, skipping - %s\n" % render_queue_item.comp.name
-
-                # Update the status icon
-                statusItem.setIcon(self.ui.errorIcon)
-                statusItem.setToolTip("Comp name has spaces at the front or back - Cannot submit to Deadline")
-                continue
-
-            # Check comp name for special characters
-            if not re.match(r'^[a-zA-Z0-9_]+$', render_queue_item.comp.name):
-                logger.debug("Comp name has special characters, skipping")
-                self.deadline_error_message += "Comp name has special characters, skipping - %s\n" % render_queue_item.comp.name
-
-                # Update the status icon
-                statusItem.setIcon(self.ui.errorIcon)
-                statusItem.setToolTip("Comp name has special characters - Cannot submit to Deadline")
-                continue
-
-            logger.debug("Render queue item checks passed")
-
-            # Grab the output folder from templates
-            render_scene_file_path = self.get_shotgrid_template(render_queue_template, use_comp_name, compName, True)
-
-            # Create the output folder if it doesn't already exist
-            render_scene_file_directory = os.path.dirname(render_scene_file_path)
-
-            # --- Secondary progress bar for per-row steps ---
-            self.show_progress_bar(format_text=f"Processing {compName}...", max=3, primary=False)
-            secondary_step = 0
-            # Step 1: Copy project file
-            try:
-                self.update_progress_bar_format(f"Copying project file for {compName}...", primary=False)
-                QtGui.QApplication.processEvents()
-
-                if not os.path.exists(render_scene_file_directory):
-                    os.makedirs(render_scene_file_directory, exist_ok=True)
-
-                shutil.copy(self.adobe.app.project.file.fsName, render_scene_file_path)
-                logger.info('Copy created: %s' % render_scene_file_path)
-
-                secondary_step += 1
-                self.update_progress_bar(secondary_step, primary=False)
-                QtGui.QApplication.processEvents()
-
-            except Exception as e:
-                logger.error("Failed to create render scene backup: %s" % e)
-                error = traceback.format_exc()
-                logger.error("%s" % error)
-                self.deadline_error_message += "Failed to create render scene backup: %s\n" % render_queue_item.comp.name
-
-                # Update the status icon
-                statusItem.setIcon(self.ui.errorIcon)
-                statusItem.setToolTip("Error - Failed to create render scene backup")
-                includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                self.hide_progress_bar(primary=False)
-                continue
-
-            # Step 2: Generate manifest
-            # try:
-            #     if not project_manifest_created:
-            #         # Generate a project manifest file for all comps in the project through jsx
-            #         self.update_progress_bar_format(f"Generating project manifest for {compName}...", primary=False)
-            #         logger.debug("Generating project manifest file...")
-            #         self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
-            #         project_manifest_created = True
-            #         logger.debug(
-            #             "Project manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-            #
-            #     self.update_progress_bar_format(f"Generating comp manifest for {compName}...", primary=False)
-            #     # Keeping the old method for now as a backup in case the new JSX method causes issues.
-            #     # The old method is slower but more robust for error catching and reporting
-            #     #self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
-            #
-            #     # Using the jsx method for manifest generation as it is significantly faster than the python method
-            #     self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
-            #     logger.debug("Manifest file generated for render queue item: %s" % render_queue_item.comp.name)
-            #
-            #     secondary_step += 1
-            #     self.update_progress_bar(secondary_step, primary=False)
-            #
-            # except Exception as e:
-            #     logger.error("Failed to generate manifest file: %s" % e)
-            #     error = traceback.format_exc()
-            #     logger.error("%s" % error)
-            #     self.deadline_error_message += "Failed to generate manifest file: %s\n" % render_queue_item.comp.name
-            #
-            #     # Update the status icon
-            #     statusItem.setIcon(self.ui.errorIcon)
-            #     statusItem.setToolTip("Error - Failed to generate manifest file")
-            #     includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-            #     self.hide_progress_bar(primary=False)
-            #     continue
-
-            # Step 3: Submit to Deadline
-            try:
-                self.update_progress_bar_format(f"Submitting {compName} to Deadline...", primary=False)
-                QtGui.QApplication.processEvents()
-                job_attrs, plugin_attrs = self.build_deadline_job_and_plugin_dicts(
-                    render_queue_item=render_queue_item,
-                    deadline_settings=current_deadline_settings,
-                    project_path=project_path,
-                    layers=False,
-                    previous_job_id=previous_job_id,
-                    version=version,
-                    render_file=render_scene_file_path
-                )
-                self.submit_render_queue_item_to_deadline_deadlineconnect(job_attrs, plugin_attrs)
-
-                logger.debug("Render queue item submitted to Deadline: %s" % render_queue_item.comp.name)
-
-                # Update Status
-                statusItem = self.ui.compTableWidget.item(row, 1)
-                statusItem.setIcon(self.ui.submitIcon)
-                statusItem.setToolTip("Submitted to Deadline")
-                num_successful_submissions += 1
-                secondary_step += 1
-                self.update_progress_bar(secondary_step, primary=False)
-                QtGui.QApplication.processEvents()
-
-            except Exception as e:
-                logger.error("Failed to submit render queue item to Deadline: %s" % e)
-                error = traceback.format_exc()
-                logger.error(error)
-                self.deadline_error_message += "Failed to submit render queue item to Deadline: %s\n" % render_queue_item.comp.name
-
-                # Update Status
-                statusItem.setIcon(self.ui.errorIcon)
-                statusItem.setToolTip("Failed to submit to Deadline - %s" % e)
-                self.hide_progress_bar(primary=False)
-                continue
-
-            self.hide_progress_bar(primary=False)
-        self.hide_progress_bar(primary=False)
-        self.update_progress_bar(100)
-        self.update_progress_bar_format("Finished submitting to Deadline")
-        time.sleep(0.2)
-        self.hide_progress_bar()
-
-        self.toggle_buttons()
-        logger.info("Finished submitting to Deadline")
-
-        # Show all submission results on one message box
-        if self.deadline_error_message:
-            self.message_box("Deadline Submission", "Submission completed with errors:\n\n%s" % self.deadline_error_message)
-        else:
-            self.message_box("Deadline Submission", "Submission completed successfully.\n\n%d jobs submitted to Deadline." % num_successful_submissions)
-
-
     def build_deadline_job_and_plugin_dicts(self, render_queue_item, deadline_settings, project_path, layers, previous_job_id, version, render_file):
         """
         Builds the required job_attrs and plugin_attrs dictionaries for submitting a job to DeadlineConnect based on the provided render queue item and settings.
@@ -2171,7 +1944,7 @@ class AppDialog(QtGui.QWidget):
         output_file_name = output_module.file.name
         output_folder = os.path.dirname(output_file_name)
         ae_project_name = os.path.basename(self.adobe.app.project.file.name)
-        job_name = f"{self.project_name} - {ae_project_name} - {render_queue_item.comp.name}"
+        job_name = f"{self.project_name} - {ae_project_name} - {render_queue_item.comp.name} - {output_module.name}"
         start_frame = ""
         end_frame = ""
         frame_list = deadline_settings.get('frame_list', "")
@@ -2228,27 +2001,33 @@ class AppDialog(QtGui.QWidget):
             "FailureDetectionTaskErrors": deadline_settings.get('failure_detection_task_errors', 8),
             "FailureDetectionJobErrors": deadline_settings.get('failure_detection_job_errors', 20),
         }
-        if dependent_comps:
+        # Group Jobs into a batch
+        if dependent_comps or deadline_settings.get('group_submissions', False):
             job_attrs["BatchName"] = f"{self.project_name} - {ae_project_name}"
+
         # Blacklist/Whitelist
         if deadline_settings.get('submit_allow_list_as_deny_list', False):
             job_attrs["Blacklist"] = deadline_settings['machine_list']
         else:
             job_attrs["Whitelist"] = deadline_settings['machine_list']
+
         # Submit Suspended
         if deadline_settings.get('submit_suspended', False):
             job_attrs["InitialStatus"] = "Suspended"
+
         # Frame List
         if not is_movie and multi_machine:
             job_attrs["Frames"] = f"1-{round(deadline_settings.get('multi_machine_tasks', False))}"
         else:
             job_attrs["Frames"] = frame_list
+
         # Output files
         for index in range(render_queue_item.numOutputModules):
             output_module = render_queue_item.outputModule(index + 1)
             key = f"OutputFilename{index}"
             value = output_module.file.fsName.replace('[#', '#').replace('#]', '#')
             job_attrs[key] = value
+
         # Movie/Chunk settings
         if is_movie:
             job_attrs["MachineLimit"] = 1
@@ -2281,6 +2060,7 @@ class AppDialog(QtGui.QWidget):
             plugin_attrs["MultiMachineMode"] = True
             plugin_attrs["MultiMachineStartFrame"] = start_frame
             plugin_attrs["MultiMachineEndFrame"] = end_frame
+
         if not multi_machine:
             min_file_size = deadline_settings.get('file_size', 0)
             delete_files_under_min_size = deadline_settings.get('delete_files', False)
@@ -2291,6 +2071,7 @@ class AppDialog(QtGui.QWidget):
             plugin_attrs["DeleteFilesUnderMinSize"] = delete_files_under_min_size
             if deadline_settings.get('include_output_path', False):
                 plugin_attrs["LocalRendering"] = deadline_settings.get('local_rendering', False)
+
         plugin_attrs["OverrideFailOnExistingAEProcess"] = deadline_settings.get('override_fail_on_existing_ae_process', False)
         plugin_attrs["FailOnExistingAEProcess"] = deadline_settings.get('fail_on_existing_ae_process', False)
         plugin_attrs["MemoryManagement"] = deadline_settings.get('memory_management', False)
@@ -2298,9 +2079,13 @@ class AppDialog(QtGui.QWidget):
         plugin_attrs["MaxMemoryPercentage"] = round(deadline_settings.get('max_memory_percentage', 0))
         return job_attrs, plugin_attrs
 
-    def submit_render_queue_item_to_deadline_deadlineconnect(self, job_attrs, plugin_attrs):
+    def submit_render_queue_item_to_deadlineconnect(self, job_attrs, plugin_attrs):
         """
-        Submits a job to Deadline using DeadlineConnect with the provided job and plugin dictionaries.
+            Submits a job to Deadline using DeadlineConnect with the provided job and plugin dictionaries.
+
+            Arguments:
+                job_attrs (dict): The dictionary containing job attributes for Deadline submission.
+                plugin_attrs (dict): The dictionary containing plugin attributes for Deadline submission.
         """
         try:
             import Deadline.DeadlineConnect as Connect
@@ -2338,7 +2123,8 @@ class AppDialog(QtGui.QWidget):
 
         logger.debug("Applying settings and submitting to Deadline")
         self.apply_to_render_queue_items()
-        self.submit_to_deadline()
+        self.submit_to_deadline_threaded()
+        self.save_deadline_qsettings()
 
     ####################################
     # Deadline Lists
@@ -2448,3 +2234,357 @@ class AppDialog(QtGui.QWidget):
 
         dialog.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Dialog)
         dialog.exec_()
+
+    ########################################
+    # Threaded functions
+    ########################################
+    def submit_to_deadline_threaded(self):
+        """
+            Submits the render queue items to Deadline using a separate thread to avoid blocking the UI
+            and to provide progress updates through a DeadlineProgressDialog.
+        """
+
+        comp_rows = []
+        comp_names = []
+        row_to_progress_idx = {}
+
+        for idx, row in enumerate(range(self.ui.compTableWidget.rowCount())):
+            item = self.ui.compTableWidget.item(row, 0)
+            includeCheckBox = self.ui.compTableWidget.item(row, 6)
+            if item and includeCheckBox and includeCheckBox.checkState() == QtCore.Qt.Checked:
+                comp_rows.append(row)
+                comp_names.append(item.text())
+                row_to_progress_idx[row] = len(comp_rows) - 1
+        self.deadline_progress_dialog = DeadlineProgressDialog(comp_names, logger=logger, parent=self)
+        self.deadline_progress_dialog.show()
+
+        # Create Thread For submissions
+        self.thread = QtCore.QThread()
+        self.worker = DeadlineSubmissionWorker(self, comp_rows, row_to_progress_idx)
+        self.worker.moveToThread(self.thread)
+
+        # Connections
+        self.thread.started.connect(self.worker.run)
+        self.worker.progress.connect(self.on_submission_progress)
+        self.worker.finished.connect(self.on_submission_finished)
+        self.worker.finished.connect(self.thread.quit)
+        self.worker.finished.connect(self.worker.deleteLater)
+        self.thread.finished.connect(self.thread.deleteLater)
+        self.worker.item_update.connect(self.on_submission_item_update)
+        self.worker.row_progress.connect(self.deadline_progress_dialog.update_progress)
+        self.worker.row_done.connect(self.deadline_progress_dialog.mark_done)
+
+        # Start Thread
+        self.thread.start()
+
+    def on_submission_item_update(self, row, message, success=True):
+        """
+            Update the status icon and tooltip for a specific row in the comp table based on the submission result.
+
+            Arguments:
+                row (int): The row to update.
+                message (str): The message to display.
+                success (bool): Whether the row was successfully updated.
+
+        """
+        statusItem = self.ui.compTableWidget.item(row, 1)
+        if statusItem is None:
+            statusItem = QtGui.QTableWidgetItem("")
+            self.ui.compTableWidget.setItem(row, 1, statusItem)
+        if success:
+            statusItem.setIcon(self.ui.submitIcon)
+            statusItem.setToolTip(message or "Submitted to Deadline")
+        else:
+            statusItem.setIcon(self.ui.errorIcon)
+            statusItem.setToolTip(message or "Submission Failed")
+
+    def on_submission_progress(self, percent, message):
+        """
+            Update the overall submission progress bar and message.
+
+            Arguments:
+                percent (int): The percent to update.
+                message (str): The message to display.
+        """
+        self.update_progress_bar(percent)
+        self.update_progress_bar_format(message)
+
+    def on_submission_finished(self, error_message, num_successful_submissions):
+        """
+            Handle the completion of the Deadline submission process, closing the progress dialog and showing a
+            message box with the results.
+
+            Arguments:
+                error_message (str): The message to display.
+                num_successful_submissions (int): The number of successful submissions.
+        """
+        if hasattr(self, "deadline_progress_dialog") and self.deadline_progress_dialog:
+            self.deadline_progress_dialog.close()
+            self.deadline_progress_dialog = None
+
+        self.hide_progress_bar()
+        self.toggle_buttons(True)
+
+        if error_message:
+            self.message_box("Deadline Submission", f"Submission failed: {error_message}")
+        else:
+            self.message_box("Deadline Submission",
+                             f"Submission completed successfully.\n\n{num_successful_submissions} jobs submitted to Deadline.")
+        self.activateWindow()
+
+
+class DeadlineSubmissionWorker(QtCore.QObject):
+    """
+        Worker class for handling the Deadline submission process in a separate thread, allowing for progress updates
+        and UI responsiveness.
+
+        Signals:
+            progress (int, str): Emitted to update overall submission progress (percent, message).
+            finished (str, int): Emitted when submission is finished (error_message, num_successful_submissions).
+            item_update (int, str, bool): Emitted to update a specific row's status (row, message, success).
+            row_progress (int, int, str): Emitted to update a specific row's progress (row, percent, message).
+            row_done (int, bool): Emitted when a specific row's submission is done (row, success).
+    """
+    progress = QtCore.Signal(int, str)  # percent, message
+    finished = QtCore.Signal(str, int)  # error message, num_successful_submissions
+    item_update = QtCore.Signal(int, str, bool)  # row, message, success
+    row_progress = QtCore.Signal(int, int, str)  # row, percent, message
+    row_done = QtCore.Signal(int, bool)  # row, success
+
+    def __init__(self, parent_dialog, comp_rows, row_to_progress_idx):
+        super().__init__()
+        self.dialog = parent_dialog
+        self.comp_rows = comp_rows
+        self.row_to_progress_idx = row_to_progress_idx
+
+    @QtCore.Slot()
+    def run(self):
+        """
+            Main function for the worker thread to handle the Deadline submission process,
+            iterating through the specified render queue items, performing necessary checks, generating manifests,
+            and submitting to Deadline while emitting progress updates  and handling errors appropriately.
+        """
+        error_message = ""
+        num_successful_submissions = 0
+
+        try:
+
+            dialog = self.dialog
+
+            if not dialog.deadline_settings_initialized:
+                dialog.populate_deadline_settings()
+
+            app_version = dialog.adobe.app.version
+            version = '.'.join(app_version.split('x')[0].split('.')[:2])
+            project_check = dialog.run_project_checks()
+
+            if not project_check:
+                self.finished.emit("Project checks failed", 0)
+                return
+
+            if dialog.ui.compTableWidget.rowCount() == 0:
+                self.finished.emit("No render queue items available", 0)
+                return
+
+            current_deadline_settings = dialog.get_deadline_settings()
+
+            deadline_error_message = ""
+            previous_job_id = ""
+            project_path = dialog.adobe.app.project.file.fsName
+            num_rows = dialog.ui.compTableWidget.rowCount()
+
+            for row in self.comp_rows:
+                progress_idx = self.row_to_progress_idx.get(row, None)
+                percent = int((row / max(1, num_rows)) * 100)
+                if progress_idx is not None:
+                    self.row_progress.emit(progress_idx, 0, "Starting submission...")
+
+                render_queue_item = dialog.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
+                includeCheckBox = dialog.ui.compTableWidget.item(row, 6)
+                statusItem = dialog.ui.compTableWidget.item(row, 1)
+                useCompNameCheckBox = dialog.ui.compTableWidget.item(row, 5)
+                compName = render_queue_item.comp.name
+                render_queue_template = dialog.get_render_queue_template(row)
+                use_comp_name = useCompNameCheckBox.checkState() == QtCore.Qt.Checked
+
+                # Checks
+
+                # Item Included Check
+                if includeCheckBox.checkState() != QtCore.Qt.Checked:
+                    msg = f"Skipped because 'Include' checkbox is not checked for comp '{compName}'."
+                    deadline_error_message += msg + "\n"
+                    self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
+                    continue
+
+                # Item Status Check
+                if render_queue_item.status != dialog.adobe.RQItemStatus.QUEUED:
+                    msg = f"Skipped because comp '{compName}' is not in QUEUED status (status={render_queue_item.status})."
+                    deadline_error_message += msg + "\n"
+                    self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
+                    continue
+
+                # Item Spaces check
+                if compName.startswith(" ") or compName.endswith(" "):
+                    msg = f"Comp name '{compName}' has spaces at the front or back. Skipping."
+                    deadline_error_message += msg + "\n"
+                    self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
+                    continue
+
+                # Iterm Special Character check
+                if not re.match(r'^[a-zA-Z0-9_]+$', compName):
+                    msg = f"Comp name '{compName}' has special characters. Only letters, numbers, and underscores are allowed. Skipping."
+                    deadline_error_message += msg + "\n"
+                    self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
+                    continue
+
+                # Output folder
+                render_scene_file_path = dialog.get_shotgrid_template(render_queue_template, use_comp_name, compName, True)
+                render_scene_file_directory = os.path.dirname(render_scene_file_path)
+
+                # Step 1: Copy project file
+                try:
+                    if progress_idx is not None:
+                        self.row_progress.emit(progress_idx, 10, f"Copying project file for {compName}...")
+                    if not os.path.exists(render_scene_file_directory):
+                        os.makedirs(render_scene_file_directory, exist_ok=True)
+                    shutil.copy(dialog.adobe.app.project.file.fsName, render_scene_file_path)
+
+                except Exception as e:
+                    msg = f"Failed to create render scene backup for comp '{compName}': {str(e)}"
+                    deadline_error_message += msg + "\n"
+                    self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
+                    continue
+
+                # Step 2: Generate manifest
+                try:
+                    if progress_idx is not None:
+                        self.row_progress.emit(progress_idx, 30, f"Generating project manifest for {compName}...")
+                    dialog.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                    if progress_idx is not None:
+                        self.row_progress.emit(progress_idx, 50, f"Generating comp manifest for {compName}...")
+                    dialog.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
+
+                except Exception as e:
+                    msg = f"Failed to generate manifest file for comp '{compName}': {str(e)}"
+                    deadline_error_message += msg + "\n"
+                    self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
+                    continue
+
+                # Step 3: Submit to Deadline
+                try:
+                    self.progress.emit(percent, f"Submitting {compName} to Deadline...")
+
+                    job_attrs, plugin_attrs = dialog.build_deadline_job_and_plugin_dicts(
+                        render_queue_item=render_queue_item,
+                        deadline_settings=current_deadline_settings,
+                        project_path=project_path,
+                        layers=False,
+                        previous_job_id=previous_job_id,
+                        version=version,
+                        render_file=render_scene_file_path
+                    )
+                    dialog.submit_render_queue_item_to_deadlineconnect(job_attrs, plugin_attrs)
+                    num_successful_submissions += 1
+                    self.item_update.emit(row, f"Submitted comp '{compName}' to Deadline successfully.", True)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, True)
+
+                except Exception as e:
+                    msg = f"Failed to submit comp '{compName}' to Deadline: {str(e)}"
+                    deadline_error_message += msg + "\n"
+                    self.item_update.emit(row, msg, False)
+                    if progress_idx is not None:
+                        self.row_done.emit(progress_idx, False)
+                    continue
+
+            # Final progress
+            self.progress.emit(100, "Finished submitting to Deadline")
+            if deadline_error_message:
+                self.finished.emit(deadline_error_message, num_successful_submissions)
+            else:
+                self.finished.emit("", num_successful_submissions)
+
+        except Exception as e:
+            self.finished.emit(str(e), num_successful_submissions)
+
+class DeadlineProgressDialog(QtGui.QDialog):
+    """
+        Dialog class for displaying the progress of Deadline submissions, with individual progress bars for each comp being submitted.
+    """
+    def __init__(self, comp_names, logger, parent=None):
+        super().__init__(parent)
+        self.logger = logger
+        self.setWindowTitle("Deadline Submission Progress")
+        self.setModal(True)
+        self.resize(600, 60 + 30 * len(comp_names))
+        self.layout = QtGui.QVBoxLayout(self)
+        self.progress_bars = {}
+
+        for idx, name in enumerate(comp_names):
+            row_widget = QtGui.QWidget(self)
+            row_layout = QtGui.QHBoxLayout(row_widget)
+            label = QtGui.QLabel(name, row_widget)
+            progress = QtGui.QProgressBar(row_widget)
+            progress.setMinimum(0)
+            progress.setMaximum(100)
+            progress.setValue(0)
+            progress.setTextVisible(True)
+            progress.setFormat("%p%")
+            row_layout.addWidget(label)
+            row_layout.addWidget(progress)
+            self.layout.addWidget(row_widget)
+            self.progress_bars[idx] = progress
+
+    @QtCore.Slot(int, int, str)
+    def update_progress(self, row, percent, message=""):
+        """
+            Update the progress bar for a specific row with the given percentage and message.
+
+            Arguments:
+                row (int): The index of the row to update.
+                percent (int): The progress percentage to set (0-100).
+                message (str): An optional message to display alongside the percentage.
+
+        """
+        self.logger.debug(f"update_progress called: row={row}, percent={percent}, message={message}")
+        bar = self.progress_bars.get(row)
+        if bar:
+            bar.setValue(percent)
+            if message:
+                bar.setFormat(f"{message} %p%")
+            else:
+                bar.setFormat("%p%")
+        else:
+            self.logger.debug(f"No progress bar found for row {row}")
+
+    @QtCore.Slot(int, bool)
+    def mark_done(self, row, success=True):
+        """
+            Mark the progress for a specific row as done, setting the progress to 100% and updating the format based on success.
+
+            Arguments:
+                row (int): The index of the row to update.
+                success (bool): Whether the progress should be marked as done.
+        """
+        self.logger.debug(f"mark_done called: row={row}, success={success}")
+        bar = self.progress_bars.get(row)
+        if bar:
+            bar.setValue(100)
+            if success:
+                bar.setFormat("Done %p%")
+            else:
+                bar.setFormat("Error %p%")
+        else:
+            self.logger.debug(f"No progress bar found for row {row}")
