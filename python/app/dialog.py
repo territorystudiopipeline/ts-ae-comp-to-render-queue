@@ -942,20 +942,13 @@ class AppDialog(QtGui.QWidget):
 
                 try:
                     logger.debug("Generating project manifest file...")
-                    self.update_progress_bar_format(f"Generating project manifest for {compName}...")
 
-                    # Generate a project manifest file for all comps in the project through jsx
+                    self.update_progress_bar_format(f"Generating project manifest for {compName}...")
                     self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
                     logger.debug("Project manifest file generated for render queue item: %s" % compName)
 
 
                     logger.debug("Generating manifest file for render queue item: %s" % compName)
-                    #self.update_progress_bar_format(f"Generating comp manifest for {compName}...")
-
-                    # Using the jsx method for manifest generation as it is significantly faster than the python method
-                   # self.generate_manifest_file_for_queue_item(render_queue_item, render_scene_file_path)
-
-                    # Generate through jsx
                     self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
                     logger.debug("Manifest file generated for render queue item: %s" % compName)
 
