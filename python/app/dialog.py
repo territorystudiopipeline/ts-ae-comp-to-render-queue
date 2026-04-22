@@ -2143,12 +2143,12 @@ class AppDialog(QtGui.QWidget):
             # If job is a dict and contains '_id', treat as success
             if isinstance(job, dict) and '_id' in job:
                 logger.info(f"Submitted Job ID: {job['_id']}")
-                return job
 
-            # Otherwise, treat as error and raise
-            error_msg = f"Deadline submission error: {job}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg)
+            else:
+                # Otherwise, treat as error and raise
+                error_msg = f"Deadline submission error: {job}"
+                logger.error(error_msg)
+                raise Exception(error_msg)
 
         except Exception as e:
             logger.error(f"DeadlineConnect submission failed: {e}")
