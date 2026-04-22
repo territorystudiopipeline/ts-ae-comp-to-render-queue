@@ -42,18 +42,6 @@ def show_dialog(app_instance):
     # to be carried out by toolkit.
     app_instance.engine.show_dialog("Add Selected Comps to Render Queue...", app_instance, AppDialog)
 
-def deprecated(reason=""):
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            warnings.warn(
-                f"Call to deprecated function {func.__name__}. {reason}",
-                category=DeprecationWarning,
-                stacklevel=2
-            )
-            return func(*args, **kwargs)
-        return wrapper
-    return decorator
 
 class AppDialog(QtGui.QWidget):
     """
@@ -123,9 +111,6 @@ class AppDialog(QtGui.QWidget):
 
         # Set the window size
         self.resize(1000, self.ui.compTableWidget.sizeHint().height())
-
-        # Manifest cache to avoid redundant analysis of comps
-        self._manifest_cache = {}
 
     def populate_sg_fields(self):
         """
@@ -350,6 +335,7 @@ class AppDialog(QtGui.QWidget):
         self.ui.addButton.clicked.connect(self.create_render_queue_items)
         self.ui.applyButton.clicked.connect(self.apply_to_render_queue_items)
         self.ui.refreshButton.clicked.connect(self.create_table_entries)
+        self.ui.clearButton.clicked.connect(self.clear_render_queue_items)
         self.ui.cancelButton.clicked.connect(self.close)
         self.ui.deadlinePanel.toggle_button.clicked.connect(self.populate_deadline_settings)
 
@@ -1025,6 +1011,36 @@ class AppDialog(QtGui.QWidget):
 
         return True
 
+    def clear_render_queue_items(self):
+        """
+            Clear all render queue items from the After Effects render queue that have been completed
+            This is to help clean up the render
+
+        """
+        logger.debug("Clearing completed render queue items")
+
+        with self.supress_dialogs():
+            count = 0
+            remove_list = []
+            renderQueueItems = self.adobe.app.project.renderQueue.items
+
+            for i in range(1, self.adobe.app.project.renderQueue.numItems + 1):
+                logger.debug("Checking render queue item: %s, status: %s" % (renderQueueItems[i].comp.name, renderQueueItems[i].status))
+
+                # Remove all items that are marked as done.
+                if renderQueueItems[i].status == self.adobe.RQItemStatus.DONE:
+                    # Add to list to remove after the loop to avoid issues with changing the collection while iterating
+                    remove_list.append(i)
+
+            for index in remove_list:
+                logger.debug("Removing render queue item: %s" % renderQueueItems[index].comp.name)
+                renderQueueItems[index].remove()
+                count += 1
+
+        logger.debug("Clear Render Queue Items Processed: %s" % count)
+
+        self.message_box("Clear Render Queue Items", "Cleared %s completed render queue items from the render queue." % count)
+
     def get_frame_range(self, comp, row):
         """
             Get the frame range to render
@@ -1445,6 +1461,7 @@ class AppDialog(QtGui.QWidget):
         self.ui.submitButton.setEnabled(state)
         self.ui.renderButton.setEnabled(state)
         self.ui.refreshButton.setEnabled(state)
+        self.ui.clearButton.setEnabled(state)
 
     #####################################################################################################
     # Events
@@ -1696,21 +1713,47 @@ class AppDialog(QtGui.QWidget):
                 dict: A dictionary containing the current Deadline settings
         """
         try:
-            self.deadline_settings = {
-                'priority': self.ui.deadline_priority.text(),
+            # Get required settings first to ensure they are always set and replace with defaults
+            # if inputs arnt valid
+
+            priority = self.ui.deadline_priority.text()
+            if priority == '':
+                priority = self.deadline_defaults['priority']
+
+            group = self.ui.deadline_group.currentText()
+            if group == '':
+                group = self.deadline_defaults['group']
+
+            chunk_size = self.ui.deadline_frames_per_task.text()
+            if not chunk_size or not chunk_size.isdigit() or int(chunk_size) < 1:
+                chunk_size = self.deadline_defaults['chunk_size']
+
+            task_timeout_minutes = self.ui.deadline_task_timeout.text()
+            if task_timeout_minutes == '':
+                task_timeout_minutes = self.deadline_defaults['task_timeout_minutes']
+
+            concurrent_tasks = self.ui.deadline_concurrent_tasks.text()
+            if concurrent_tasks == '':
+                concurrent_tasks = self.deadline_defaults['concurrent_tasks']
+
+
+            deadline_settings = {
+                'priority': priority,
                 'pool': self.ui.deadline_pool.currentText(),
                 'secondary_pool': self.ui.deadline_secondary_pool.currentText(),
-                'group': self.ui.deadline_group.currentText(),
-                'chunk_size': self.ui.deadline_frames_per_task.text(),
+                'group': group,
+                'chunk_size': chunk_size,
                 'frame_list': self.ui.deadline_frame_list.text(),
                 'submit_scene': self.ui.deadline_submit_project_file_with_job.isChecked(),
                 'override_frame_list': self.ui.deadline_use_frame_list_from_comp.isChecked(),
-                'task_timeout_minutes': self.ui.deadline_task_timeout.text(),
-                'concurrent_tasks': self.ui.deadline_concurrent_tasks.text(),
+                'task_timeout_minutes': task_timeout_minutes,
+                'concurrent_tasks': concurrent_tasks,
                 'limit_groups': self.ui.deadline_limits.get_text(),
                 'machine_list': self.ui.deadline_machine_list.get_text(),
+                'machine_limit': self.ui.deadline_machine_limit.text() or self.deadline_defaults.get('machine_limit', ''),
                 'submit_allow_list_as_deny_list': self.ui.deadline_machine_list_deny.isChecked(),
                 'submit_suspended': self.ui.deadline_submit_as_suspended.isChecked(),
+                'submit_entire_render_queue': self.ui.deadline_submit_entire_render_queue.isChecked(),
                 'multi_machine': self.ui.deadline_multi_machine_rendering.isChecked(),
                 'multi_machine_tasks': self.ui.deadline_multi_machine_number_of_machines.get_value(),
                 'file_size': self.ui.deadline_minimum_file_size.get_value(),
@@ -1738,12 +1781,14 @@ class AppDialog(QtGui.QWidget):
                 'comment': self.ui.deadline_comment.text(),
                 'group_submissions' : self.ui.deadline_group_submissions.isChecked(),
             }
+
+            return deadline_settings
+
         except Exception as e:
             logger.error(f"Failed to get Deadline settings: {e}")
             error = traceback.format_exc()
             logger.error(error)
-
-        return self.deadline_settings
+            return None
 
     def populate_deadline_settings(self):
         """
@@ -1851,7 +1896,6 @@ class AppDialog(QtGui.QWidget):
     def load_deadline_qsettings(self):
         """
             Load the Deadline settings from a QSettings file.
-            It first tries to load settings specific to the current scene, and if not found, it loads the last used settings.
         """
         scene_path = self.adobe.app.project.file.fsName
         qsettings = QtCore.QSettings("Territory", "AfterEffectsDeadlineSubmission")
@@ -1886,6 +1930,7 @@ class AppDialog(QtGui.QWidget):
             "machine_list": lambda v: self.ui.deadline_machine_list.set_text(v),
             "submit_allow_list_as_deny_list": lambda v: self.ui.deadline_machine_list_deny.setChecked(v),
             "submit_suspended": lambda v: self.ui.deadline_submit_as_suspended.setChecked(v),
+            "submit_entire_render_queue": lambda v: self.ui.deadline_submit_entire_render_queue.setChecked(v),
             "multi_machine": lambda v: self.ui.deadline_multi_machine_rendering.setChecked(v),
             "multi_machine_tasks": lambda v: self.ui.deadline_multi_machine_number_of_machines.set_value(v),
             "file_size": lambda v: self.ui.deadline_minimum_file_size.set_value(v),
@@ -1989,12 +2034,12 @@ class AppDialog(QtGui.QWidget):
             "Comment": deadline_settings.get('comment', ''),
             "Department": deadline_settings.get('department', self.project_name or ''),
             "Group": deadline_settings.get('group', 'ae'),
-            "Pool": deadline_settings.get('pool', 'none'),
-            "SecondaryPool": deadline_settings.get('secondary_pool', 'none'),
-            "Priority": deadline_settings.get('priority', 30),
-            "TaskTimeoutMinutes": deadline_settings.get('task_timeout_minutes', '0'),
+            "Pool": deadline_settings.get('pool', self.ae_default_pool),
+            "SecondaryPool": deadline_settings.get('secondary_pool', self.deadline_defaults['secondary_pool']),
+            "Priority": deadline_settings.get('priority', self.deadline_defaults['priority']),
+            "TaskTimeoutMinutes": deadline_settings.get('task_timeout_minutes', self.deadline_defaults['task_timeout_minutes']),
             "LimitGroups": deadline_settings.get('limit_groups', ''),
-            "ConcurrentTasks": deadline_settings.get('concurrent_tasks', '1'),
+            "ConcurrentTasks": deadline_settings.get('concurrent_tasks', self.deadline_defaults['concurrent_tasks']),
             "LimitConcurrentTasksToNumberOfCpus": deadline_settings.get('limit_concurrent_tasks_to_number_cpus', '0'),
             "JobDependencies": current_job_dependencies,
             "OnJobComplete": deadline_settings.get('on_job_complete', 'Nothing'),
@@ -2007,9 +2052,9 @@ class AppDialog(QtGui.QWidget):
 
         # Blacklist/Whitelist
         if deadline_settings.get('submit_allow_list_as_deny_list', False):
-            job_attrs["Blacklist"] = deadline_settings['machine_list']
+            job_attrs["Blacklist"] = deadline_settings.get('machine_list', '')
         else:
-            job_attrs["Whitelist"] = deadline_settings['machine_list']
+            job_attrs["Whitelist"] = deadline_settings.get('machine_list', '')
 
         # Submit Suspended
         if deadline_settings.get('submit_suspended', False):
@@ -2094,11 +2139,17 @@ class AppDialog(QtGui.QWidget):
             deadline = Connect.DeadlineCon(host, port)
             job = deadline.Jobs.SubmitJob(job_attrs, plugin_attrs)
             logger.info(f"Deadline submission results: {job}")
-            if isinstance(job, dict):
-                    if '_id' in job:
-                        logger.info(f"Submitted Job ID: {job['_id']}")
-            else:
-                logger.error(f"Deadline submission error: {job}")
+
+            # If job is a dict and contains '_id', treat as success
+            if isinstance(job, dict) and '_id' in job:
+                logger.info(f"Submitted Job ID: {job['_id']}")
+                return job
+
+            # Otherwise, treat as error and raise
+            error_msg = f"Deadline submission error: {job}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
         except Exception as e:
             logger.error(f"DeadlineConnect submission failed: {e}")
             logger.error(traceback.format_exc())
@@ -2123,6 +2174,12 @@ class AppDialog(QtGui.QWidget):
 
         logger.debug("Applying settings and submitting to Deadline")
         self.apply_to_render_queue_items()
+
+        # Save file
+        self.adobe.app.project.save()
+        logger.debug("Project saved")
+
+        # Submit files and save current submission settings
         self.submit_to_deadline_threaded()
         self.save_deadline_qsettings()
 

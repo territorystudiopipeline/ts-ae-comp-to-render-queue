@@ -610,6 +610,7 @@ class Ui_Dialog(object):
         add_icon_path = os.path.join(script_dir, 'icons', 'add_icon.png')
         apply_icon_path = os.path.join(script_dir, 'icons', 'apply_icon.png')
         refresh_icon_path = os.path.join(script_dir, 'icons', 'refresh_icon.png')
+        clear_queue_icon_path = os.path.join(script_dir, 'icons', 'clear_queue_icon.png')
 
         # Static Icons
         self.warningIcon = QtGui.QIcon()
@@ -626,6 +627,8 @@ class Ui_Dialog(object):
         self.applyIcon.addPixmap(QtGui.QPixmap(apply_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
         self.refreshIcon = QtGui.QIcon()
         self.refreshIcon.addPixmap(QtGui.QPixmap(refresh_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
+        self.clearQueueIcon = QtGui.QIcon()
+        self.clearQueueIcon.addPixmap(QtGui.QPixmap(clear_queue_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
 
         # Comp Table
         self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Use Comp Name", "Include"]
@@ -1231,6 +1234,17 @@ class Ui_Dialog(object):
         self.refreshButton.setMinimumWidth(40)
         self.refreshButton.setMaximumWidth(40)
 
+        # Clear Queue
+        self.clearButton = QtGui.QPushButton(Dialog)
+        self.clearButton.setObjectName("clearButton")
+        self.clearButton.setIcon(self.clearQueueIcon)
+        self.clearButton.setToolTip("Clear Render Queue History")
+        self.clearButton.setIconSize(QtCore.QSize(30, 30))
+        self.clearButton.setMinimumHeight(40)
+        self.clearButton.setMaximumHeight(40)
+        self.clearButton.setMinimumWidth(40)
+        self.clearButton.setMaximumWidth(40)
+
         # Render Queue
         self.renderButton = QtGui.QPushButton(Dialog)
         self.renderButton.setObjectName("renderButton")
@@ -1250,6 +1264,7 @@ class Ui_Dialog(object):
         self.sideMenuLayout.addWidget(self.addButton, alignment=QtCore.Qt.AlignHCenter)
         self.sideMenuLayout.addWidget(self.applyButton, alignment=QtCore.Qt.AlignHCenter)
         self.sideMenuLayout.addWidget(self.refreshButton, alignment=QtCore.Qt.AlignHCenter)
+        self.sideMenuLayout.addWidget(self.clearButton, alignment=QtCore.Qt.AlignHCenter)
         self.sideMenuLayout.addStretch()
 
         self.mainLayout.addLayout(self.buttonsLayout)
