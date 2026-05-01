@@ -1019,25 +1019,22 @@ class AppDialog(QtGui.QWidget):
         """
         logger.debug("Clearing completed render queue items")
 
+        renderQueue = self.adobe.app.project.renderQueue
+
         with self.supress_dialogs():
             count = 0
-            remove_list = []
-            renderQueueItems = self.adobe.app.project.renderQueue.items
 
-            for i in range(1, self.adobe.app.project.renderQueue.numItems + 1):
-                logger.debug("Checking render queue item: %s, status: %s" % (renderQueueItems[i].comp.name, renderQueueItems[i].status))
-
-                # Remove all items that are marked as done.
-                if renderQueueItems[i].status == self.adobe.RQItemStatus.DONE:
-                    # Add to list to remove after the loop to avoid issues with changing the collection while iterating
-                    remove_list.append(i)
-
-            for index in remove_list:
-                logger.debug("Removing render queue item: %s" % renderQueueItems[index].comp.name)
-                renderQueueItems[index].remove()
-                count += 1
+            for i in range(renderQueue.numItems, 0, -1):
+                item = renderQueue.item(i)
+                if item.status == self.adobe.RQItemStatus.DONE or item.status == self.adobe.RQItemStatus.USER_STOPPED:
+                    logger.debug("Removing render queue item: %s" % item.comp.name)
+                    item.remove()
+                    count += 1
 
         logger.debug("Clear Render Queue Items Processed: %s" % count)
+
+        # Refresh Table
+        self.create_table_entries()
 
         self.message_box("Clear Render Queue Items", "Cleared %s completed render queue items from the render queue." % count)
 
