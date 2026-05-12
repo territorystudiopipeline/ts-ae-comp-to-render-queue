@@ -56,6 +56,7 @@ try {
 } catch (e) {
     DEBUG = 0;
 }
+var SGTK_TASK_METADATA = null;
 
 function getCompOutputLocationsFromJson() {
     var compOutputMap = {};
@@ -99,6 +100,9 @@ function getCompOutputLocationsFromJson() {
                 var jsonStr = jsonFile.read();
                 var compsList = JSON.parse(jsonStr);
                 if (compsList && compsList.length) {
+                    if (compsList[0].task_metadata && compsList[0].task_metadata.task) {
+                        SGTK_TASK_METADATA = compsList[0].task_metadata.task.name || null;
+                    }
                     for (var i = 0; i < compsList.length; i++) {
                         var entry = compsList[i];
                         if (entry.name && entry.output_location) {
@@ -248,9 +252,10 @@ function collectManifestData(comp, manifestCache, sceneFilePath) {
     manifestCache[compIdentifier] = manifest;
     return manifest;
 }
-function writeProjectManifestFile(sceneFilePath, compManifests, outputFolderPath) {
+function writeProjectManifestFile(sceneFilePath, compManifests, outputFolderPath, taskMetadata) {
     var manifest = {
         scene_file: sceneFilePath,
+        task: taskMetadata || null,   
         comps: compManifests
     };
     var filePath = outputFolderPath + "/project_manifest.json";
@@ -260,6 +265,14 @@ function writeProjectManifestFile(sceneFilePath, compManifests, outputFolderPath
         logError("Failed to write project manifest: " + e.toString());
         if (DEBUG) alert("Failed to write project manifest: " + e);
     }
+}
+
+function getTaskMetadata() {
+    if (typeof SGTK_TASK_METADATA !== "undefined" && SGTK_TASK_METADATA !== null) {
+        return SGTK_TASK_METADATA;
+    }
+    logError("SGTK_TASK_METADATA not available");
+    return null;
 }
 
 function getProjectManifestOutputFolder() {
@@ -338,8 +351,9 @@ function main() {
         delete manifest.scene_file;
         compManifests[comp.name] = manifest;
     }
+    var taskMetadata = getTaskMetadata(); 
     var manifestOutputFolder = getProjectManifestOutputFolder();
-    writeProjectManifestFile(sceneFilePath, compManifests, manifestOutputFolder);
+    writeProjectManifestFile(sceneFilePath, compManifests, manifestOutputFolder, taskMetadata);
     if (DEBUG) alert("Project manifest file created at: " + manifestOutputFolder);
 }
 

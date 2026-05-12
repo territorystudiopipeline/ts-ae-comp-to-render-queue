@@ -756,6 +756,14 @@ class AppDialog(QtGui.QWidget):
             logger.error(f"No write permission for directory: {comp_id_dir}")
             return
 
+        # Build task metadata from context
+        ctx = self._app.context
+        task_metadata = {
+            "task": ctx.task,
+        }
+        for comp in comp_identifiers:
+            comp["task_metadata"] = task_metadata
+        
         # Write comp identifier JSON file next to the project file
         comp_id_json_path = os.path.join(comp_id_dir, "_comp_identifiers.json")
         try:
