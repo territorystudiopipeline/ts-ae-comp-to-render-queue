@@ -60,12 +60,13 @@ var SGTK_TASK_METADATA = null;
 
 function getCompOutputLocationsFromJson() {
     var compOutputMap = {};
+    var compPublishTypeMap = {}; 
     var projectFile = app.project.file;
     if (!projectFile) {
         var msg = "Project file is not saved. Please save your project before running this script.";
         logError(msg);
         if (DEBUG) alert(msg);
-        return compOutputMap;
+        return { outputMap: compOutputMap, publishTypeMap: compPublishTypeMap };
     }
     var projectFolder = projectFile.parent;
     var parentFolder = projectFolder.parent;
@@ -93,20 +94,23 @@ function getCompOutputLocationsFromJson() {
             var msg2 = "_comp_identifiers.json not found in either project or parent folder.";
             logError(msg2);
             if (DEBUG) alert(msg2);
-            return compOutputMap;
+            return { outputMap: compOutputMap, publishTypeMap: compPublishTypeMap };
         }
         if (jsonFile.open("r")) {
             try {
                 var jsonStr = jsonFile.read();
                 var compsList = JSON.parse(jsonStr);
                 if (compsList && compsList.length) {
-                    if (compsList[0].task_metadata && compsList[0].task_metadata.task) {
-                        SGTK_TASK_METADATA = compsList[0].task_metadata.task.name || null;
+                    if (compsList[0].task_metadata) {
+                        SGTK_TASK_METADATA = compsList[0].task_metadata;
                     }
                     for (var i = 0; i < compsList.length; i++) {
                         var entry = compsList[i];
                         if (entry.name && entry.output_location) {
                             compOutputMap[entry.name] = entry.output_location;
+                        }
+                        if (entry.name && entry.task_metadata && entry.task_metadata.publish_type) {
+                            compPublishTypeMap[entry.name] = entry.task_metadata.publish_type;
                         }
                     }
                     }
@@ -119,7 +123,7 @@ function getCompOutputLocationsFromJson() {
     } catch (e) {
         logError("Error reading comp identifiers JSON: " + e.toString());
     }
-    return compOutputMap;
+    return { outputMap: compOutputMap, publishTypeMap: compPublishTypeMap };
 }
 
 function findAllComps() {
@@ -255,7 +259,8 @@ function collectManifestData(comp, manifestCache, sceneFilePath) {
 function writeProjectManifestFile(sceneFilePath, compManifests, outputFolderPath, taskMetadata) {
     var manifest = {
         scene_file: sceneFilePath,
-        task: taskMetadata || null,   
+        task: taskMetadata ? taskMetadata.task : null,
+        step: taskMetadata ? taskMetadata.step : null,   
         comps: compManifests
     };
     var filePath = outputFolderPath + "/project_manifest.json";
@@ -323,7 +328,9 @@ function main() {
         if (DEBUG) alert(msg);
         return;
     }
-    var compOutputMap = getCompOutputLocationsFromJson();
+    var result = getCompOutputLocationsFromJson(); 
+    var compOutputMap = result.outputMap;
+    var compPublishTypeMap = result.publishTypeMap;
     var allComps = findAllComps();
     if (!allComps.length) {
         var msg2 = "No comps found in the project.";
@@ -349,6 +356,7 @@ function main() {
         var compSceneFilePath = (new File(outputFolderPath + "/" + sceneFileName)).fsName;
         var manifest = collectManifestData(comp, manifestCache, compSceneFilePath);
         delete manifest.scene_file;
+        manifest.publish_type = compPublishTypeMap[comp.name] || null;
         compManifests[comp.name] = manifest;
     }
     var taskMetadata = getTaskMetadata(); 
