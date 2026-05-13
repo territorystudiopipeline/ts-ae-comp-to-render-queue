@@ -630,8 +630,37 @@ class Ui_Dialog(object):
         self.clearQueueIcon = QtGui.QIcon()
         self.clearQueueIcon.addPixmap(QtGui.QPixmap(clear_queue_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
 
+        # Task Context Bar
+        self.taskContextLayout = QtGui.QHBoxLayout()
+        self.taskContextLayout.setObjectName("taskContextLayout")
+        self.taskContextLayout.setSpacing(5)
+        self.taskContextLayout.setContentsMargins(0, 0, 0, 0)
+
+        self.taskContextLabel = QtGui.QLabel("Current Task:")
+        self.taskContextLabel.setObjectName("taskContextLabel")
+        self.taskContextLabel.setMinimumWidth(80)
+        self.taskContextLabel.setMaximumWidth(140)
+
+        self.taskContextDisplay = QtGui.QLabel("No task in context")
+        self.taskContextDisplay.setObjectName("taskContextDisplay")
+        self.taskContextDisplay.setStyleSheet("color: #aaa; font-style: italic;")
+
+        self.taskComboBox = QtGui.QComboBox()
+        self.taskComboBox.setObjectName("taskComboBox")
+        self.taskComboBox.setToolTip("Select a task to associate with this render")
+        self.taskComboBox.setMinimumWidth(200)
+        self.taskComboBox.hide()  
+
+        self.taskContextLayout.addWidget(self.taskContextLabel)
+        self.taskContextLayout.addWidget(self.taskContextDisplay)
+        self.taskContextLayout.addWidget(self.taskComboBox)
+        self.taskContextLayout.addStretch()
+
+        # Add task bar above the table
+        self.mainLayout.insertLayout(0, self.taskContextLayout)
+        
         # Comp Table
-        self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Use Comp Name", "Include"]
+        self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Publish Type", "Use Comp Name", "Include"]
         self.compTableWidget = DraggableTableWidget(Dialog)
         self.compTableWidget.setObjectName("compTableWidget")
         self.compTableWidget.setColumnCount(len(self.compTableHeaders))
@@ -646,6 +675,7 @@ class Ui_Dialog(object):
         header.setSectionResizeMode(4, QtGui.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QtGui.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QtGui.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QtGui.QHeaderView.ResizeToContents)  
 
         # Set Initial column width
         self.compTableWidget.setColumnWidth(1, 200)
