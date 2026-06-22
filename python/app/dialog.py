@@ -51,6 +51,7 @@ class AppDialog(QtGui.QWidget):
     COMP_TEXT = 'Comp frame range'
     WORK_AREA_TEXT = 'Work area frame range'
     SINGLE_FRAME_TEXT = 'Single frame'
+    STEPS = ["Graphics", "onSetGraphics"]
 
     def __init__(self):
         """
@@ -73,6 +74,7 @@ class AppDialog(QtGui.QWidget):
         self.project_id = self.current_project["id"]
         self.project_name = self.current_project["name"]
         self.project_code = None
+        self.step = None
 
         logger.debug(f"Current Project: {self.current_project}")
         logger.debug(f"Project ID: {self.project_id}")
@@ -105,7 +107,6 @@ class AppDialog(QtGui.QWidget):
         self.populate_presets()
         self.populate_sg_fields()
         self.connect_signals_and_slots()
-        self.populate_task_context_bar()
 
         # Create render queue items
         self.create_render_queue_items()
@@ -312,49 +313,59 @@ class AppDialog(QtGui.QWidget):
 
         ctx = context or self._app.context
 
-        if not ctx.task:
-            logger.warning("No task found in context.")
+        step_entity = None
+
+        if ctx.task:
+            current_task_name = ctx.task["name"]
+            logger.debug("Current task: %s", current_task_name)
+
+            # Try matching a Step by task name 
+            step_by_name = self._app.shotgun.find_one(
+                "Step",
+                [["code", "is", current_task_name]],
+                ["id", "code"]
+            )
+
+            if step_by_name:
+                probe = self._app.shotgun.find(
+                    "CustomNonProjectEntity06",
+                    [["sg_steps", "is", step_by_name]],
+                    ["id", "code"]
+                )
+                if probe:
+                    step_entity = step_by_name
+                else:
+                    logger.debug("Step '%s' has no publish types linked", current_task_name)
+
+            if not step_entity:
+                task_data = self._app.shotgun.find_one(
+                    "Task",
+                    [["id", "is", ctx.task["id"]]],
+                    ["step"]
+                )
+                if task_data and task_data.get("step"):
+                    candidate = task_data["step"]
+                    probe = self._app.shotgun.find(
+                        "CustomNonProjectEntity06",
+                        [["sg_steps", "is", candidate]],
+                        ["id", "code"]
+                    )
+                    if probe:
+                        step_entity = candidate
+                    else:
+                        logger.debug("Pipeline step for task has no publish types linked")
+
+        # If no valid step is found, use given STEP list
+        if not step_entity:
+            logger.debug("No valid step with publish types found, showing step picker")
+            self._show_step_picker()
             return
 
-        current_task_name = ctx.task["name"]
-        logger.debug("Current task: %s", current_task_name)
+        step_name = step_entity.get("code") or step_entity.get("name") or ""
+        self.ui.stepValueLabel.setText(step_name)
+        self.ui.stepValueLabel.show()
 
-        step_entity = self._app.shotgun.find_one(
-            "Step",
-            [["code", "is", current_task_name]],
-            ["id", "code"]
-        )
-
-        if step_entity:
-            logger.debug("Found Step matching task name: %s", step_entity)
-            # Check this step actually has publish types linked before committing to it
-            probe = self._app.shotgun.find(
-                "CustomNonProjectEntity06",
-                [["sg_steps", "is", step_entity]],
-                ["id"]
-            )
-            if not probe:
-                logger.debug(
-                    "Step '%s' has no publish types linked",
-                    current_task_name
-                )
-                step_entity = None 
-
-        if not step_entity:
-            # Fetch the pipeline Step linked to this Task
-            task_data = self._app.shotgun.find_one(
-                "Task",
-                [["id", "is", ctx.task["id"]]],
-                ["step"]
-            )
-            if not task_data or not task_data.get("step"):
-                logger.warning(
-                    "Task '%s' has no pipeline Step linked.",
-                    current_task_name
-                )
-                return
-            step_entity = task_data["step"]
-            logger.debug("Resolved Step from Task entity: %s", step_entity)
+        self.ui.stepComboBox.hide()
 
         publish_types = self._app.shotgun.find(
             "CustomNonProjectEntity06",
@@ -366,6 +377,7 @@ class AppDialog(QtGui.QWidget):
             logger.warning(
                 "No publish types found for Step: %s", step_entity.get("code", step_entity)
             )
+            self._show_step_picker()
             return
 
         logger.debug("Found publish types: %s", publish_types)
@@ -384,6 +396,76 @@ class AppDialog(QtGui.QWidget):
             if graphics_index >= 0:
                 widget.setCurrentIndex(graphics_index)
                 
+    def _show_step_picker(self):
+        """
+        Populate and show the step picker combo box 
+        """
+        self.ui.stepValueLabel.hide()
+        self.ui.stepComboBox.blockSignals(True)
+        self.ui.stepComboBox.clear()
+        self.ui.stepComboBox.addItem("", None) 
+        for step_name in self.STEPS:
+            step = self._app.shotgun.find_one(
+                "Step",
+                [["code", "is", step_name]],
+                ["id", "code"]
+            )
+            if step:
+                self.ui.stepComboBox.addItem(step_name, step)
+            else:
+                logger.warning("step '%s' not found in ShotGrid", step_name)
+        self.ui.stepComboBox.blockSignals(False)
+        self.ui.stepComboBox.show()
+
+        try:
+            self.ui.stepComboBox.currentIndexChanged.disconnect()
+        except Exception:
+            pass
+        self.ui.stepComboBox.currentIndexChanged.connect(self.on_step_selection_changed)
+
+    def on_step_selection_changed(self, index):
+        """
+        Repopulates all publish type dropdowns from the selected step.
+        """
+        step_entity = self.ui.stepComboBox.itemData(index)
+        if not step_entity:
+            return  
+
+        self.step = step_entity
+        
+        logger.debug("User selected step: %s", step_entity)
+
+        publish_types = self._app.shotgun.find(
+            "CustomNonProjectEntity06",
+            [["sg_steps", "is", step_entity]],
+            ["code", "id", "sg_prefix"]
+        )
+
+        if not publish_types:
+            logger.warning("No publish types found for selected step: %s", step_entity)
+            return
+
+        self.publish_types = {}
+        for pt in publish_types:
+            name = pt.get("code")
+            if not name:
+                continue
+            pt["step"] = step_entity
+            self.publish_types[name] = pt
+
+        for row in range(self.ui.compTableWidget.rowCount()):
+            dropdown = self.ui.compTableWidget.cellWidget(row, 5)
+            if not dropdown:
+                continue
+            dropdown.blockSignals(True)
+            dropdown.clear()
+            for name, pt in self.publish_types.items():
+                dropdown.addItem(name, pt)
+            graphics_index = dropdown.findText("graphics")
+            if graphics_index >= 0:
+                dropdown.setCurrentIndex(graphics_index)
+            dropdown.blockSignals(False)
+
     def populate_presets(self, widget=None):
         """
             Populate the render format dropdown with the available
@@ -412,60 +494,6 @@ class AppDialog(QtGui.QWidget):
             if widget:
                 widget.insertItems(-1, [preset_item['name']])
 
-    def populate_task_context_bar(self):
-        """
-        Show the current task in context, or if none, populate a dropdown
-        with tasks linked to the current entity so the user can pick one.
-        """
-        ctx = self._app.context
-
-        if ctx.task:
-            self.ui.taskContextDisplay.setText("%s" % (ctx.task.get("name", "Unknown")))
-            self.ui.taskContextDisplay.setStyleSheet("color: #ccc; font-style: normal;")
-            self.ui.taskComboBox.hide()
-            return
-
-        self.ui.taskContextDisplay.setText("No task in context, select one:")
-        self.ui.taskContextDisplay.setStyleSheet("color: orange; font-style: italic;")
-
-        entity = ctx.entity
-        if not entity:
-            logger.warning("No entity in context, cannot query tasks.")
-            self.ui.taskComboBox.hide()
-            return
-
-        try:
-            tasks = self._app.shotgun.find(
-                "Task",
-                [["entity", "is", entity]],
-                ["id", "content", "step"]
-            )
-        except Exception as e:
-            logger.error("Failed to query tasks for entity: %s", e)
-            self.ui.taskComboBox.hide()
-            return
-
-        if not tasks:
-            logger.warning("No tasks found for entity: %s", entity)
-            self.ui.taskComboBox.hide()
-            return
-
-        self.ui.taskComboBox.blockSignals(True)
-        self.ui.taskComboBox.clear()
-        for task in tasks:
-            label = task.get("content", "Unknown Task")
-            self.ui.taskComboBox.addItem(label, task)
-        self.ui.taskComboBox.blockSignals(False)
-        self.ui.taskComboBox.show()
-
-        try:
-            self.ui.taskComboBox.currentIndexChanged.disconnect()
-        except Exception:
-            pass
-        self.ui.taskComboBox.currentIndexChanged.connect(self.on_task_selection_changed)
-
-        self.on_task_selection_changed(0)
-
     def on_task_selection_changed(self, index):
         """
         Refreshes all publish type dropdowns using the selected task context.
@@ -481,6 +509,9 @@ class AppDialog(QtGui.QWidget):
             task["type"],
             task["id"]
         )
+
+        # Re evaluate step validity for the new task context
+        self.populate_publish_type(context=self._current_context)
 
         # Refresh every publish type dropdown in the table
         for row in range(self.ui.compTableWidget.rowCount()):
@@ -939,23 +970,22 @@ class AppDialog(QtGui.QWidget):
 
         # Build task metadata from context
         ctx = self._app.context
-        if not ctx.task and hasattr(self, "_current_context") and self._current_context:
-            ctx = self._current_context
 
-        if not ctx.task:
-            logger.warning("No task in context, skipping task metadata for manifest.")
-            task_metadata = {"task": None, "step": None}
-        else:
+        task_entity = ctx.task if ctx and ctx.task else None
+
+        step_entity = self.step
+
+        if not step_entity and task_entity:
             task_data = self._app.shotgun.find_one(
                 "Task",
-                [["id", "is", ctx.task["id"]]],
+                [["id", "is", task_entity["id"]]],
                 ["step"]
             )
             step_entity = task_data.get("step") if task_data else None
-            task_metadata = {
-                "task": ctx.task,
-                "step": step_entity,
-            }
+        task_metadata = {
+            "task": task_entity,
+            "step": step_entity,
+        }
 
         for comp in comp_identifiers:
             comp["task_metadata"] = {

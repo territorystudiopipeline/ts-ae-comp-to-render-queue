@@ -630,34 +630,34 @@ class Ui_Dialog(object):
         self.clearQueueIcon = QtGui.QIcon()
         self.clearQueueIcon.addPixmap(QtGui.QPixmap(clear_queue_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
 
-        # Task Context Bar
-        self.taskContextLayout = QtGui.QHBoxLayout()
-        self.taskContextLayout.setObjectName("taskContextLayout")
-        self.taskContextLayout.setSpacing(5)
-        self.taskContextLayout.setContentsMargins(0, 0, 0, 0)
+        # Step Context Bar
+        self.stepContextLayout = QtGui.QHBoxLayout()
+        self.stepContextLayout.setObjectName("stepContextLayout")
+        self.stepContextLayout.setSpacing(5)
+        self.stepContextLayout.setContentsMargins(0, 0, 0, 0)
+        
+        self.stepValueLabel = QtGui.QLabel("")
+        self.stepValueLabel.setObjectName("stepValueLabel")
+        self.stepValueLabel.hide()
+        
+        self.stepContextLabel = QtGui.QLabel("Step:")
+        self.stepContextLabel.setObjectName("stepContextLabel")
+        self.stepContextLabel.setMinimumWidth(80)
+        self.stepContextLabel.setMaximumWidth(140)
 
-        self.taskContextLabel = QtGui.QLabel("Current Task:")
-        self.taskContextLabel.setObjectName("taskContextLabel")
-        self.taskContextLabel.setMinimumWidth(80)
-        self.taskContextLabel.setMaximumWidth(140)
+        self.stepComboBox = QtGui.QComboBox()
+        self.stepComboBox.setObjectName("stepComboBox")
+        self.stepComboBox.setToolTip("Select a step to determine publish types")
+        self.stepComboBox.setMinimumWidth(200)
+        self.stepComboBox.hide()
 
-        self.taskContextDisplay = QtGui.QLabel("No task in context")
-        self.taskContextDisplay.setObjectName("taskContextDisplay")
-        self.taskContextDisplay.setStyleSheet("color: #aaa; font-style: italic;")
-
-        self.taskComboBox = QtGui.QComboBox()
-        self.taskComboBox.setObjectName("taskComboBox")
-        self.taskComboBox.setToolTip("Select a task to associate with this render")
-        self.taskComboBox.setMinimumWidth(200)
-        self.taskComboBox.hide()  
-
-        self.taskContextLayout.addWidget(self.taskContextLabel)
-        self.taskContextLayout.addWidget(self.taskContextDisplay)
-        self.taskContextLayout.addWidget(self.taskComboBox)
-        self.taskContextLayout.addStretch()
+        self.stepContextLayout.addWidget(self.stepContextLabel)
+        self.stepContextLayout.addWidget(self.stepValueLabel)
+        self.stepContextLayout.addWidget(self.stepComboBox)
+        self.stepContextLayout.addStretch()
 
         # Add task bar above the table
-        self.mainLayout.insertLayout(0, self.taskContextLayout)
+        self.mainLayout.insertLayout(0, self.stepContextLayout)
         
         # Comp Table
         self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Publish Type", "Use Comp Name", "Include"]
