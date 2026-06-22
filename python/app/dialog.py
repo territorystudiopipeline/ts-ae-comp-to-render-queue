@@ -51,6 +51,7 @@ class AppDialog(QtGui.QWidget):
     COMP_TEXT = 'Comp frame range'
     WORK_AREA_TEXT = 'Work area frame range'
     SINGLE_FRAME_TEXT = 'Single frame'
+    STEPS = ["Graphics", "onSetGraphics"]
 
     def __init__(self):
         """
@@ -73,6 +74,7 @@ class AppDialog(QtGui.QWidget):
         self.project_id = self.current_project["id"]
         self.project_name = self.current_project["name"]
         self.project_code = None
+        self.step = None
 
         logger.debug(f"Current Project: {self.current_project}")
         logger.debug(f"Project ID: {self.project_id}")
@@ -279,11 +281,20 @@ class AppDialog(QtGui.QWidget):
         if currentTemplate in self.presets:
             renderFormatDropdown.setCurrentIndex(renderFormatDropdown.findText(currentTemplate))
 
+        #Add publish_type dropdown
+        publish_type_dropdown = QtGui.QComboBox()
+        publish_type_dropdown.setToolTip("Select the publish type")
+        publish_type_dropdown.installEventFilter(self)
+        
+        self.populate_publish_type(publish_type_dropdown)
+        
+        self.ui.compTableWidget.setCellWidget(rowPosition, 5, publish_type_dropdown)
+
         # Add the use comp name checkbox
         useCompNameCheckBox = QtGui.QTableWidgetItem()
         useCompNameCheckBox.setCheckState(QtCore.Qt.Checked)
         useCompNameCheckBox.setToolTip("Use the comp name as the output file name")
-        self.ui.compTableWidget.setItem(rowPosition, 5, useCompNameCheckBox)
+        self.ui.compTableWidget.setItem(rowPosition, 6, useCompNameCheckBox)
 
         # Connect the signals and slots
         frameRangeComboBox.currentIndexChanged.connect(lambda: self.refresh_frame_range(frameRangeComboBox, frameRangeLineEdit, item))
@@ -295,7 +306,165 @@ class AppDialog(QtGui.QWidget):
         includeCheckBox = QtGui.QTableWidgetItem()
         includeCheckBox.setCheckState(QtCore.Qt.Checked)
         includeCheckBox.setToolTip("Include this item in the render queue")
-        self.ui.compTableWidget.setItem(rowPosition, 6, includeCheckBox)
+        self.ui.compTableWidget.setItem(rowPosition, 7, includeCheckBox)
+
+    def populate_publish_type(self, widget=None, context=None):
+        self.publish_types = {}
+
+        ctx = context or self._app.context
+
+        step_entity = None
+
+        if ctx.task:
+            current_task_name = ctx.task["name"]
+            logger.debug("Current task: %s", current_task_name)
+
+            # Try matching a Step by task name 
+            step_by_name = self._app.shotgun.find_one(
+                "Step",
+                [["code", "is", current_task_name]],
+                ["id", "code"]
+            )
+
+            if step_by_name:
+                probe = self._app.shotgun.find(
+                    "CustomNonProjectEntity06",
+                    [["sg_steps", "is", step_by_name]],
+                    ["id", "code"]
+                )
+                if probe:
+                    step_entity = step_by_name
+                else:
+                    logger.debug("Step '%s' has no publish types linked", current_task_name)
+
+            if not step_entity:
+                task_data = self._app.shotgun.find_one(
+                    "Task",
+                    [["id", "is", ctx.task["id"]]],
+                    ["step"]
+                )
+                if task_data and task_data.get("step"):
+                    candidate = task_data["step"]
+                    probe = self._app.shotgun.find(
+                        "CustomNonProjectEntity06",
+                        [["sg_steps", "is", candidate]],
+                        ["id", "code"]
+                    )
+                    if probe:
+                        step_entity = candidate
+                    else:
+                        logger.debug("Pipeline step for task has no publish types linked")
+
+        # If no valid step is found, use given STEP list
+        if not step_entity:
+            logger.debug("No valid step with publish types found, showing step picker")
+            self._show_step_picker()
+            return
+
+        step_name = step_entity.get("code") or step_entity.get("name") or ""
+        self.ui.stepValueLabel.setText(step_name)
+        self.ui.stepValueLabel.show()
+
+        self.ui.stepComboBox.hide()
+
+        publish_types = self._app.shotgun.find(
+            "CustomNonProjectEntity06",
+            [["sg_steps", "is", step_entity]],
+            ["code", "id", "sg_prefix"]
+        )
+
+        if not publish_types:
+            logger.warning(
+                "No publish types found for Step: %s", step_entity.get("code", step_entity)
+            )
+            self._show_step_picker()
+            return
+
+        logger.debug("Found publish types: %s", publish_types)
+
+        for publish_type in publish_types:
+            name = publish_type.get("code")
+            if not name:
+                continue
+            publish_type["step"] = step_entity
+            self.publish_types[name] = publish_type
+            if widget:
+                widget.addItem(name, publish_type)
+
+        if widget:
+            graphics_index = widget.findText("graphics")
+            if graphics_index >= 0:
+                widget.setCurrentIndex(graphics_index)
+                
+    def _show_step_picker(self):
+        """
+        Populate and show the step picker combo box 
+        """
+        self.ui.stepValueLabel.hide()
+        self.ui.stepComboBox.blockSignals(True)
+        self.ui.stepComboBox.clear()
+        self.ui.stepComboBox.addItem("", None) 
+        for step_name in self.STEPS:
+            step = self._app.shotgun.find_one(
+                "Step",
+                [["code", "is", step_name]],
+                ["id", "code"]
+            )
+            if step:
+                self.ui.stepComboBox.addItem(step_name, step)
+            else:
+                logger.warning("step '%s' not found in ShotGrid", step_name)
+        self.ui.stepComboBox.blockSignals(False)
+        self.ui.stepComboBox.show()
+
+        try:
+            self.ui.stepComboBox.currentIndexChanged.disconnect()
+        except Exception:
+            pass
+        self.ui.stepComboBox.currentIndexChanged.connect(self.on_step_selection_changed)
+
+    def on_step_selection_changed(self, index):
+        """
+        Repopulates all publish type dropdowns from the selected step.
+        """
+        step_entity = self.ui.stepComboBox.itemData(index)
+        if not step_entity:
+            return  
+
+        self.step = step_entity
+        
+        logger.debug("User selected step: %s", step_entity)
+
+        publish_types = self._app.shotgun.find(
+            "CustomNonProjectEntity06",
+            [["sg_steps", "is", step_entity]],
+            ["code", "id", "sg_prefix"]
+        )
+
+        if not publish_types:
+            logger.warning("No publish types found for selected step: %s", step_entity)
+            return
+
+        self.publish_types = {}
+        for pt in publish_types:
+            name = pt.get("code")
+            if not name:
+                continue
+            pt["step"] = step_entity
+            self.publish_types[name] = pt
+
+        for row in range(self.ui.compTableWidget.rowCount()):
+            dropdown = self.ui.compTableWidget.cellWidget(row, 5)
+            if not dropdown:
+                continue
+            dropdown.blockSignals(True)
+            dropdown.clear()
+            for name, pt in self.publish_types.items():
+                dropdown.addItem(name, pt)
+            graphics_index = dropdown.findText("graphics")
+            if graphics_index >= 0:
+                dropdown.setCurrentIndex(graphics_index)
+            dropdown.blockSignals(False)
 
     def populate_presets(self, widget=None):
         """
@@ -325,6 +494,39 @@ class AppDialog(QtGui.QWidget):
             if widget:
                 widget.insertItems(-1, [preset_item['name']])
 
+    def on_task_selection_changed(self, index):
+        """
+        Refreshes all publish type dropdowns using the selected task context.
+        """
+        task = self.ui.taskComboBox.itemData(index)
+        if not task:
+            return
+
+        logger.debug("User selected task: %s", task)
+
+        # Build a fresh context from the selected task
+        self._current_context = self._app.sgtk.context_from_entity(
+            task["type"],
+            task["id"]
+        )
+
+        # Re evaluate step validity for the new task context
+        self.populate_publish_type(context=self._current_context)
+
+        # Refresh every publish type dropdown in the table
+        for row in range(self.ui.compTableWidget.rowCount()):
+            publish_type_dropdown = self.ui.compTableWidget.cellWidget(row, 5)
+
+            if publish_type_dropdown:
+                publish_type_dropdown.blockSignals(True)
+                publish_type_dropdown.clear()
+                publish_type_dropdown.blockSignals(False)
+
+                self.populate_publish_type(
+                    publish_type_dropdown,
+                    context=self._current_context
+                )
+                
     def connect_signals_and_slots(self):
         """
             Connect the signals and slots
@@ -486,8 +688,9 @@ class AppDialog(QtGui.QWidget):
                 statusItem = self.ui.compTableWidget.item(row, 1)
                 frameRangeComboBox = self.ui.compTableWidget.cellWidget(row, 3)
                 renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
-                useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
-                includeCheckBox = self.ui.compTableWidget.item(row, 6)
+                publishTypeDropdown = self.ui.compTableWidget.cellWidget(row, 5)
+                useCompNameCheckBox = self.ui.compTableWidget.item(row, 6)
+                includeCheckBox = self.ui.compTableWidget.item(row, 7)
 
                 compName = tableItem.text() if tableItem else f"Row {row+1}"
                 progress = int((row / total_rows) * 100)
@@ -639,7 +842,16 @@ class AppDialog(QtGui.QWidget):
                             use_comp_name = False
                         logger.debug("Use Comp Name: %s" % use_comp_name)
 
-                        outputLocation = self.get_shotgrid_template(render_queue_template, use_comp_name, compName)
+                        publish_type_entity = None
+
+                        if publishTypeDropdown:
+                            publish_type_entity = publishTypeDropdown.itemData(
+                                publishTypeDropdown.currentIndex()
+                            )
+
+                        logger.debug("Selected publish type entity: %s", publish_type_entity)
+                        
+                        outputLocation = self.get_shotgrid_template(render_queue_template, use_comp_name, compName, publish_type_entity=publish_type_entity)
                         folderPath = os.path.dirname(outputLocation)
                         if not os.path.exists(folderPath):
                             os.makedirs(folderPath)
@@ -756,6 +968,31 @@ class AppDialog(QtGui.QWidget):
             logger.error(f"No write permission for directory: {comp_id_dir}")
             return
 
+        # Build task metadata from context
+        ctx = self._app.context
+
+        task_entity = ctx.task if ctx and ctx.task else None
+
+        step_entity = self.step
+
+        if not step_entity and task_entity:
+            task_data = self._app.shotgun.find_one(
+                "Task",
+                [["id", "is", task_entity["id"]]],
+                ["step"]
+            )
+            step_entity = task_data.get("step") if task_data else None
+        task_metadata = {
+            "task": task_entity,
+            "step": step_entity,
+        }
+
+        for comp in comp_identifiers:
+            comp["task_metadata"] = {
+                **task_metadata,
+                "publish_type": comp.pop("publish_type", None),
+            }
+        
         # Write comp identifier JSON file next to the project file
         comp_id_json_path = os.path.join(comp_id_dir, "_comp_identifiers.json")
         try:
@@ -792,7 +1029,7 @@ class AppDialog(QtGui.QWidget):
             logger.error(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
             logger.error(f"Command: {' '.join(command)}")
 
-    def generate_manifest_file_for_queue_item_jsx(self, render_queue_item, render_scene_file_path):
+    def generate_manifest_file_for_queue_item_jsx(self, render_queue_item, render_scene_file_path, publish_type_entity=None):
         """
             Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file.
 
@@ -804,7 +1041,8 @@ class AppDialog(QtGui.QWidget):
         comp_identifier = {
             "name": comp.name,
             "id": getattr(comp, 'id', None),
-            "output_location": os.path.dirname(render_scene_file_path)
+            "output_location": os.path.dirname(render_scene_file_path),
+            "publish_type": publish_type_entity,
         }
         jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../jsx/generate_manifest_from_comps.jsx'))
 
@@ -815,7 +1053,7 @@ class AppDialog(QtGui.QWidget):
 
         self._run_jsx_manifest_generation([comp_identifier], jsx_script_path)
 
-    def generate_project_manifest_file_jsx(self, render_queue_item, render_scene_file_path):
+    def generate_project_manifest_file_jsx(self, render_queue_item, render_scene_file_path, publish_type_entity=None):
         """
             Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file for the entire project.
 
@@ -827,7 +1065,8 @@ class AppDialog(QtGui.QWidget):
         comp_identifier = {
             "name": comp.name,
             "id": getattr(comp, 'id', None),
-            "output_location": os.path.dirname(render_scene_file_path)
+            "output_location": os.path.dirname(render_scene_file_path),
+            "publish_type": publish_type_entity,
         }
         jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../jsx/generate_manifest_for_all_comps.jsx'))
 
@@ -891,9 +1130,10 @@ class AppDialog(QtGui.QWidget):
             tableItem = self.ui.compTableWidget.item(row, 0)
             statusItem = self.ui.compTableWidget.item(row, 1)
             renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
-            useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
-            includeCheckBox = self.ui.compTableWidget.item(row, 6)
-
+            publishTypeDropdown = self.ui.compTableWidget.cellWidget(row, 5)
+            useCompNameCheckBox = self.ui.compTableWidget.item(row, 6)
+            includeCheckBox = self.ui.compTableWidget.item(row, 7)
+            
             render_queue_item = tableItem.data(QtCore.Qt.UserRole)
             comp = render_queue_item.comp
             compName = comp.name
@@ -905,11 +1145,22 @@ class AppDialog(QtGui.QWidget):
 
                 logger.debug("Use Comp Name: %s" % use_comp_name)
 
+                publish_type_entity = None
+
+                if publishTypeDropdown:
+                    publish_type_entity = publishTypeDropdown.itemData(
+                        publishTypeDropdown.currentIndex()
+                    )
+
+                logger.debug("Selected publish type entity: %s", publish_type_entity)
+                
                 # Grab the output folder from templates
                 render_scene_file_path = self.get_shotgrid_template(render_queue_template,
                                                                     use_comp_name,
                                                                     compName,
-                                                                    True)
+                                                                    True,
+                                                                    publish_type_entity
+                                                                    )
 
                 # Create the output folder if it doesn't already exist
                 render_scene_file_directory = os.path.dirname(render_scene_file_path)
@@ -930,12 +1181,12 @@ class AppDialog(QtGui.QWidget):
                     logger.debug("Generating project manifest file...")
 
                     self.update_progress_bar_format(f"Generating project manifest for {compName}...")
-                    self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                    self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path, publish_type_entity)
                     logger.debug("Project manifest file generated for render queue item: %s" % compName)
 
 
                     logger.debug("Generating manifest file for render queue item: %s" % compName)
-                    self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
+                    self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path, publish_type_entity)
                     logger.debug("Manifest file generated for render queue item: %s" % compName)
 
                 except Exception as e:
@@ -1293,7 +1544,7 @@ class AppDialog(QtGui.QWidget):
             defaultButton=QtGui.QMessageBox.Ok,
         )
 
-    def get_shotgrid_template(self, render_queue_template, use_comp_name=False, comp_name=None, render_scene=False):
+    def get_shotgrid_template(self, render_queue_template, use_comp_name=False, comp_name=None, render_scene=False, publish_type_entity=None):
         """
             Get the output location from the render queue template
 
@@ -1332,7 +1583,11 @@ class AppDialog(QtGui.QWidget):
         template = self._app.engine.get_template_by_name(templateName)
 
         # Apply context as base fields
-        fields = self._app.context.as_template_fields(template)
+        ctx = self._app.context  
+        if not ctx.task and hasattr(self, "_current_context") and self._current_context:
+            ctx = self._current_context
+        fields = ctx.as_template_fields(template)
+
 
         # Grab fields from filename
         fileName = self.adobe.app.project.file.name
@@ -1346,6 +1601,9 @@ class AppDialog(QtGui.QWidget):
         fields['version'] = int(match.group(5))
         fields['ext'] = template_file_name.split("_")[0]
         fields['ae_comp_name'] = comp_name
+        if publish_type_entity:
+            fields['publish_type'] = publish_type_entity.get("code")
+            fields['prefix'] = publish_type_entity.get("sg_prefix", "")
 
         # Add in a %04d number if it's a sequence then strip it out to be [####] for AE
         if 'SEQ' in template.keys:
@@ -2454,13 +2712,27 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                     self.row_progress.emit(progress_idx, 0, "Starting submission...")
 
                 render_queue_item = dialog.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
-                includeCheckBox = dialog.ui.compTableWidget.item(row, 6)
+                includeCheckBox = dialog.ui.compTableWidget.item(row, 7)
                 statusItem = dialog.ui.compTableWidget.item(row, 1)
-                useCompNameCheckBox = dialog.ui.compTableWidget.item(row, 5)
+                publishTypeDropdown = dialog.ui.compTableWidget.cellWidget(row, 5)
+                useCompNameCheckBox = dialog.ui.compTableWidget.item(row, 6)
                 compName = render_queue_item.comp.name
                 render_queue_template = dialog.get_render_queue_template(row)
                 use_comp_name = useCompNameCheckBox.checkState() == QtCore.Qt.Checked
 
+                publish_type_entity = None
+
+                if publishTypeDropdown:
+                    publish_type_entity = publishTypeDropdown.itemData(
+                        publishTypeDropdown.currentIndex()
+                    )
+
+                logger.debug(
+                    "Selected publish type entity for %s: %s",
+                    compName,
+                    publish_type_entity
+                )
+                
                 # Checks
 
                 # Item Included Check
@@ -2500,7 +2772,7 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                     continue
 
                 # Output folder
-                render_scene_file_path = dialog.get_shotgrid_template(render_queue_template, use_comp_name, compName, True)
+                render_scene_file_path = dialog.get_shotgrid_template(render_queue_template, use_comp_name, compName, True, publish_type_entity)
                 render_scene_file_directory = os.path.dirname(render_scene_file_path)
 
                 # Step 1: Copy project file
@@ -2523,10 +2795,10 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                 try:
                     if progress_idx is not None:
                         self.row_progress.emit(progress_idx, 30, f"Generating project manifest for {compName}...")
-                    dialog.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                    dialog.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path, publish_type_entity)
                     if progress_idx is not None:
                         self.row_progress.emit(progress_idx, 50, f"Generating comp manifest for {compName}...")
-                    dialog.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
+                    dialog.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path, publish_type_entity)
 
                 except Exception as e:
                     msg = f"Failed to generate manifest file for comp '{compName}': {str(e)}"

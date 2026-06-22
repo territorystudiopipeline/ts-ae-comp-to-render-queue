@@ -630,8 +630,37 @@ class Ui_Dialog(object):
         self.clearQueueIcon = QtGui.QIcon()
         self.clearQueueIcon.addPixmap(QtGui.QPixmap(clear_queue_icon_path), QtGui.QIcon.Normal, QtGui.QIcon.Off)
 
+        # Step Context Bar
+        self.stepContextLayout = QtGui.QHBoxLayout()
+        self.stepContextLayout.setObjectName("stepContextLayout")
+        self.stepContextLayout.setSpacing(5)
+        self.stepContextLayout.setContentsMargins(0, 0, 0, 0)
+        
+        self.stepValueLabel = QtGui.QLabel("")
+        self.stepValueLabel.setObjectName("stepValueLabel")
+        self.stepValueLabel.hide()
+        
+        self.stepContextLabel = QtGui.QLabel("Step:")
+        self.stepContextLabel.setObjectName("stepContextLabel")
+        self.stepContextLabel.setMinimumWidth(80)
+        self.stepContextLabel.setMaximumWidth(140)
+
+        self.stepComboBox = QtGui.QComboBox()
+        self.stepComboBox.setObjectName("stepComboBox")
+        self.stepComboBox.setToolTip("Select a step to determine publish types")
+        self.stepComboBox.setMinimumWidth(200)
+        self.stepComboBox.hide()
+
+        self.stepContextLayout.addWidget(self.stepContextLabel)
+        self.stepContextLayout.addWidget(self.stepValueLabel)
+        self.stepContextLayout.addWidget(self.stepComboBox)
+        self.stepContextLayout.addStretch()
+
+        # Add task bar above the table
+        self.mainLayout.insertLayout(0, self.stepContextLayout)
+        
         # Comp Table
-        self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Use Comp Name", "Include"]
+        self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Publish Type", "Use Comp Name", "Include"]
         self.compTableWidget = DraggableTableWidget(Dialog)
         self.compTableWidget.setObjectName("compTableWidget")
         self.compTableWidget.setColumnCount(len(self.compTableHeaders))
@@ -646,6 +675,7 @@ class Ui_Dialog(object):
         header.setSectionResizeMode(4, QtGui.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QtGui.QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QtGui.QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QtGui.QHeaderView.ResizeToContents)  
 
         # Set Initial column width
         self.compTableWidget.setColumnWidth(1, 200)
