@@ -10,7 +10,6 @@
 import shutil
 import subprocess
 import warnings
-import functools
 
 import sgtk
 import os
@@ -104,6 +103,11 @@ class AppDialog(QtGui.QWidget):
         # self.ui.context.setText("Current Context: %s" % self._app.context)
         self.populate_presets()
         self.populate_sg_fields()
+
+        # Flags for multi-row propagation behavior.
+        self._is_propagating_table_edit = False
+        self._active_combo_selection_rows = []
+
         self.connect_signals_and_slots()
 
         # Create render queue items
@@ -145,6 +149,31 @@ class AppDialog(QtGui.QWidget):
         self.ui.deadline_priority.setText(str(self.deadline_defaults["priority"]))
         self.ui.deadline_concurrent_tasks.setText(str(self.deadline_defaults["concurrent_tasks"]))
         self.ui.deadline_task_timeout.setText(str(self.deadline_defaults["task_timeout_minutes"]))
+
+    def get_scene_name(self, sanitize=False):
+        """
+            Get the current scene name from the project file
+
+            Arguments:
+                sanitize (bool): If true, sanitize the scene name
+
+            Returns:
+                str: The current scene name
+        """
+
+        scene_name = self.adobe.app.project.file.name
+
+        if not(sanitize):
+            return scene_name
+
+        else:
+            # Remove Ext and version number _v###
+            scene_name = os.path.splitext(scene_name)[0]
+
+            scene_name = re.sub(r'_v\d{3}$', '', scene_name)
+
+            return scene_name
+
 
     def get_selected_comps(self):
         """
@@ -288,6 +317,17 @@ class AppDialog(QtGui.QWidget):
         # Connect the signals and slots
         frameRangeComboBox.currentIndexChanged.connect(lambda: self.refresh_frame_range(frameRangeComboBox, frameRangeLineEdit, item))
 
+        # Propagation signals
+        frameRangeComboBox.currentIndexChanged[str].connect(
+            lambda text, w=frameRangeComboBox, c=3: self._on_combo_changed_propagate(w, text, c)
+        )
+        renderFormatDropdown.currentIndexChanged[str].connect(
+            lambda text, w=renderFormatDropdown, c=4: self._on_combo_changed_propagate(w, text, c)
+        )
+        frameRangeLineEdit.textEdited.connect(
+            lambda text, w=frameRangeLineEdit, c=2: self._on_line_edit_edited(w, text, c)
+        )
+
         # Trigger the signal to set the default frame range
         frameRangeComboBox.emit(QtCore.SIGNAL("currentIndexChanged(int)"), 0)
 
@@ -354,6 +394,9 @@ class AppDialog(QtGui.QWidget):
         self.ui.removeSelectedCompsAction.triggered.connect(self.remove_selected_comps)
         self.ui.matchSelectedCompsAction.triggered.connect(self.match_selected_to_current_row)
         self.ui.refreshAction.triggered.connect(self.create_table_entries)
+
+        # Propagation signals
+        self.ui.compTableWidget.itemChanged.connect(self._on_table_item_changed)
 
     def refresh_frame_range(self, frameRangeComboBox, frameRangeLineEdit, renderQueueItem):
         """
@@ -837,6 +880,37 @@ class AppDialog(QtGui.QWidget):
 
         self._run_jsx_manifest_generation([comp_identifier], jsx_script_path)
 
+    def generate_project_manifest_file_jsx_threaded(self, render_queue_item, render_scene_file_path):
+        """
+            Run project-level manifest generation in a worker thread and block until completion.
+
+            Arguments:
+                render_queue_item (RenderQueueItem): The render queue item to generate manifest file.
+                render_scene_file_path (str): The path to the scene file to generate manifest file.
+        """
+        thread = QtCore.QThread(self)
+        worker = LocalProjectManifestWorker(self, render_queue_item, render_scene_file_path)
+        worker.moveToThread(thread)
+
+        result = {"error": ""}
+        wait_loop = QtCore.QEventLoop()
+
+        def _on_finished(error_message):
+            result["error"] = error_message or ""
+            wait_loop.quit()
+
+        worker.finished.connect(_on_finished)
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        thread.start()
+        wait_loop.exec_()
+
+        if result["error"]:
+            raise RuntimeError(result["error"])
+
     def process_queue_items_for_render(self):
         """
             Process the render queue items for rendering locally
@@ -930,13 +1004,8 @@ class AppDialog(QtGui.QWidget):
                     logger.debug("Generating project manifest file...")
 
                     self.update_progress_bar_format(f"Generating project manifest for {compName}...")
-                    self.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
+                    self.generate_project_manifest_file_jsx_threaded(render_queue_item, render_scene_file_path)
                     logger.debug("Project manifest file generated for render queue item: %s" % compName)
-
-
-                    logger.debug("Generating manifest file for render queue item: %s" % compName)
-                    self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
-                    logger.debug("Manifest file generated for render queue item: %s" % compName)
 
                 except Exception as e:
                     logger.error("Failed to generate manifest file: %s" % e)
@@ -1460,12 +1529,225 @@ class AppDialog(QtGui.QWidget):
         self.ui.refreshButton.setEnabled(state)
         self.ui.clearButton.setEnabled(state)
 
+    #########################
+    # Propagation Methods
+    #########################
+    def _snapshot_selection_for_combo(self):
+        """
+            Capture selected rows before combo interaction mutates table selection.
+        """
+        self._active_combo_selection_rows = self._get_selected_rows()
+
+    def _effective_selected_rows(self, source_row, preferred_rows=None):
+        """
+            Resolve selected rows using preferred rows for interaction-specific propagation.
+
+            Arguments:
+                source_row: The row to select from
+                preferred_rows: The preferred rows to select from
+
+            Returns:
+                list: The effective selected rows
+        """
+        preferred_rows = sorted(preferred_rows or [])
+        if len(preferred_rows) > 1 and source_row in preferred_rows:
+            return preferred_rows
+
+        current_rows = self._get_selected_rows()
+        if len(current_rows) > 1 and source_row in current_rows:
+            return current_rows
+
+        fallback_rows = list(current_rows)
+        if source_row >= 0 and source_row not in fallback_rows:
+            fallback_rows.append(source_row)
+        return sorted(fallback_rows)
+
+    def _get_selected_rows(self):
+        """
+            Return selected row indices as a sorted list.
+
+            Returns:
+                list: Sorted list of selected row indices.
+        """
+        selection_model = self.ui.compTableWidget.selectionModel()
+        if selection_model is not None:
+            return sorted({idx.row() for idx in selection_model.selectedRows()})
+
+        rows = {idx.row() for idx in self.ui.compTableWidget.selectedIndexes()}
+        return sorted(rows)
+
+    def _restore_selected_rows(self, rows):
+        """
+            Re-apply row selection after combo edits that alter table selection.
+
+            Arguments:
+                rows: The rows to restore selection from
+        """
+        table = self.ui.compTableWidget
+        valid_rows = sorted({row for row in (rows or []) if 0 <= row < table.rowCount()})
+        if not valid_rows:
+            return
+
+        last_col = max(0, table.columnCount() - 1)
+        was_blocked = table.blockSignals(True)
+        try:
+            table.clearSelection()
+            for row in valid_rows:
+                row_range = QtGui.QTableWidgetSelectionRange(row, 0, row, last_col)
+                table.setRangeSelected(row_range, True)
+        finally:
+            table.blockSignals(was_blocked)
+
+    def _restore_selected_rows_deferred(self, rows):
+        """Restore selection after combo popup/focus handling completes."""
+        rows_to_restore = list(rows or [])
+        QtCore.QTimer.singleShot(0, lambda: self._restore_selected_rows(rows_to_restore))
+
+    def _propagate_cell_change(self, source_row, col, apply_fn, preferred_rows=None):
+        """
+            Propagate a cell edit to all selected rows in the same column.
+            `apply_fn(target_row)` applies the value to one target row.
+
+            Arguments:
+                source_row: The row to propagate cell edit to.
+                apply_fn: Function to apply the cell edit to `source_row`.
+
+            Returns:
+                None
+        """
+        if self._is_propagating_table_edit:
+            return
+
+        selected_rows = self._effective_selected_rows(source_row, preferred_rows=preferred_rows)
+
+        # Only propagate when editing a selected row and multi-row selection exists.
+        if len(selected_rows) <= 1 or source_row not in selected_rows:
+            return
+
+        self._is_propagating_table_edit = True
+        try:
+            for row in selected_rows:
+                if row == source_row:
+                    continue
+                apply_fn(row)
+        finally:
+            self._is_propagating_table_edit = False
+
+    def _on_line_edit_edited(self, source_widget, value_text, col):
+        """
+            Handle line edit edits and propagate changes to selected rows.
+
+            Arguments:
+                col: The column to propagate cell edit to.
+                value_text: The value to edit.
+        """
+        source_row = self._row_for_cell_widget(source_widget)
+        if source_row < 0:
+            return
+
+        def _apply(row):
+            line_edit = self.ui.compTableWidget.cellWidget(row, col)
+            if line_edit is not None:
+                line_edit.setText(value_text)
+
+        self._propagate_cell_change(source_row, col, _apply)
+
+    def _row_for_cell_widget(self, widget):
+        """
+            Resolve current row for a cell widget.
+
+            Arguments:
+                widget: The cell widget to resolve.
+
+            Returns:
+                int: The row index of the cell widget, or -1 if not found.
+        """
+        table = self.ui.compTableWidget
+        for row in range(table.rowCount()):
+            for col in (2, 3, 4):
+                if table.cellWidget(row, col) is widget:
+                    return row
+        return -1
+
+    def _on_combo_changed_propagate(self, source_widget, value_text, col):
+        """
+            Propagate combo value in `col` from the edited row to other selected rows.
+
+            Arguments:
+                source_widget: The cell widget to edit.
+                value_text: The value to edit.
+                col: The column to propagate cell edit to.
+        """
+        if self._is_propagating_table_edit:
+            return
+
+        source_row = self._row_for_cell_widget(source_widget)
+        if source_row < 0:
+            return
+
+        def _apply(row):
+            """
+                Apply `value_text` to `row`.
+            """
+            combo = self.ui.compTableWidget.cellWidget(row, col)
+            if combo is None:
+                return
+
+            idx = combo.findText(value_text)
+            if idx >= 0 and combo.currentIndex() != idx:
+                combo.setCurrentIndex(idx)
+
+        rows_to_restore = list(self._active_combo_selection_rows or [])
+        if source_row not in rows_to_restore:
+            rows_to_restore.append(source_row)
+        rows_to_restore = sorted(set(rows_to_restore))
+
+        self._propagate_cell_change(
+            source_row,
+            col,
+            _apply,
+            preferred_rows=rows_to_restore,
+        )
+
+        # Keep the original multi-row selection visible after combo commit.
+        self._restore_selected_rows_deferred(rows_to_restore)
+        self._active_combo_selection_rows = []
+
+    def _on_table_item_changed(self, item):
+        """
+            Handle table item changes and propagate changes to selected rows.
+
+            Arguments:
+                item: The item that was changed.
+
+            Returns:
+                None
+        """
+
+        if self._is_propagating_table_edit:
+            return
+
+        col = item.column()
+        # TODO: Make Sure to check this each time the columns change
+        # Checkbox columns are QTableWidgetItem-based (5, 6)
+        if col not in (5, 6):
+            return
+
+        state = item.checkState()
+        source_row = item.row()
+
+        def _apply(row):
+            target = self.ui.compTableWidget.item(row, col)
+            if target is not None:
+                target.setCheckState(state)
+
+        self._propagate_cell_change(source_row, col, _apply)
     #####################################################################################################
     # Events
     #####################################################################################################
     def eventFilter(self, obj, event):
         """
-        Event filter to void mouse scroll events for specific widgets.
+        Event filter to handle specific events for QComboBox and QWheelEvent.
 
         Arguments:
             obj: The object that received the event.
@@ -1473,8 +1755,12 @@ class AppDialog(QtGui.QWidget):
         Returns:
             bool: True if the event is handled, False otherwise.
         """
-        if event.type() == QtCore.QEvent.Wheel and isinstance(obj, QtGui.QComboBox):
-            return True  # Ignore the wheel event
+        if isinstance(obj, QtGui.QComboBox):
+            if event.type() == QtCore.QEvent.MouseButtonPress:
+                # Snapshot selection before the combo interaction can change row selection.
+                self._snapshot_selection_for_combo()
+            if event.type() == QtCore.QEvent.Wheel:
+                return True  # Ignore the wheel event
         return super(AppDialog, self).eventFilter(obj, event)
 
     ####################################################################################################
@@ -1723,7 +2009,7 @@ class AppDialog(QtGui.QWidget):
 
             chunk_size = self.ui.deadline_frames_per_task.text()
             if not chunk_size or not chunk_size.isdigit() or int(chunk_size) < 1:
-                chunk_size = self.deadline_defaults['chunk_size']
+                chunk_size = self.deadline_defaults['frames_per_task']
 
             task_timeout_minutes = self.ui.deadline_task_timeout.text()
             if task_timeout_minutes == '':
@@ -1885,18 +2171,18 @@ class AppDialog(QtGui.QWidget):
         """
             Save the Deadline settings to a QSettings file.
         """
-        scene_path = self.adobe.app.project.file.fsName
+        scene_name = self.get_scene_name(sanitize= True)
         settings = self.get_deadline_settings()
         qsettings = QtCore.QSettings("Territory", "AfterEffectsDeadlineSubmission")
-        qsettings.setValue(f"deadline_settings/{scene_path}", settings)
+        qsettings.setValue(f"deadline_settings/{scene_name}", settings)
 
     def load_deadline_qsettings(self):
         """
             Load the Deadline settings from a QSettings file.
         """
-        scene_path = self.adobe.app.project.file.fsName
+        scene_name = self.get_scene_name(sanitize=True)
         qsettings = QtCore.QSettings("Territory", "AfterEffectsDeadlineSubmission")
-        settings = qsettings.value(f"deadline_settings/{scene_path}")
+        settings = qsettings.value(f"deadline_settings/{scene_name}")
 
         return settings
 
@@ -2572,6 +2858,38 @@ class DeadlineSubmissionWorker(QtCore.QObject):
 
         except Exception as e:
             self.finished.emit(str(e), num_successful_submissions)
+
+
+class LocalProjectManifestWorker(QtCore.QObject):
+    """
+        Worker for running project manifest generation outside the main UI thread.
+    """
+    finished = QtCore.Signal(str)
+
+    def __init__(self, dialog, render_queue_item, render_scene_file_path):
+        super().__init__()
+        self.dialog = dialog
+        self.render_queue_item = render_queue_item
+        self.render_scene_file_path = render_scene_file_path
+
+    @QtCore.Slot()
+    def run(self):
+        error_message = ""
+        try:
+            self.dialog.generate_project_manifest_file_jsx(self.render_queue_item, self.render_scene_file_path)
+        except Exception as e:
+            error_message = str(e)
+            logger.error("Failed generating project manifest on local worker: %s" % error_message)
+            logger.error(traceback.format_exc())
+
+        #try:
+        #    self.generate_manifest_file_for_queue_item_jsx(self.render_queue_item, self.render_scene_file_path)
+        #except Exception as e:
+        #    error_message += "\n" + str(e)
+        #    logger.error("Failed generating comp manifest on local worker: %s" % str(e))
+        #    logger.error(traceback.format_exc())
+
+        self.finished.emit(error_message)
 
 class DeadlineProgressDialog(QtGui.QDialog):
     """

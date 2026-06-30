@@ -24,6 +24,14 @@ class DraggableTableWidget(QtGui.QTableWidget):
         self.setSelectionBehavior(QtGui.QTableWidget.SelectRows)
         self.setSelectionMode(QtGui.QTableWidget.MultiSelection)
 
+    def mouseDoubleClickEvent(self, event):
+        idx = self.indexAt(event.pos())
+        if not idx.isValid():
+            self.clearSelection()
+            event.accept()
+            return
+        super(DraggableTableWidget, self).mouseDoubleClickEvent(event)
+
 
 class CollapsiblePanel(QtGui.QWidget):
     """
