@@ -2197,18 +2197,22 @@ class AppDialog(QtGui.QWidget):
         if not settings:
             return
 
+        # QSettings can return numeric values for saved text fields.
+        # Ensure UI text-based widgets always receive strings.
+        to_text = lambda v: "" if v is None else str(v)
+
         setters = {
-            "priority": lambda v: self.ui.deadline_priority.setText(v),
-            "pool": lambda v: self.ui.deadline_pool.setCurrentText(v),
-            "secondary_pool": lambda v: self.ui.deadline_secondary_pool.setCurrentText(v),
-            "group": lambda v: self.ui.deadline_group.setCurrentText(v),
-            "on_job_complete": lambda v: self.ui.deadline_on_job_complete.setCurrentText(v),
-            "chunk_size": lambda v: self.ui.deadline_frames_per_task.setText(v),
-            "frame_list": lambda v: self.ui.deadline_frame_list.setText(v),
+            "priority": lambda v: self.ui.deadline_priority.setText(to_text(v)),
+            "pool": lambda v: self.ui.deadline_pool.setCurrentText(to_text(v)),
+            "secondary_pool": lambda v: self.ui.deadline_secondary_pool.setCurrentText(to_text(v)),
+            "group": lambda v: self.ui.deadline_group.setCurrentText(to_text(v)),
+            "on_job_complete": lambda v: self.ui.deadline_on_job_complete.setCurrentText(to_text(v)),
+            "chunk_size": lambda v: self.ui.deadline_frames_per_task.setText(to_text(v)),
+            "frame_list": lambda v: self.ui.deadline_frame_list.setText(to_text(v)),
             "submit_scene": lambda v: self.ui.deadline_submit_project_file_with_job.setChecked(v),
             "override_frame_list": lambda v: self.ui.deadline_use_frame_list_from_comp.setChecked(v),
-            "task_timeout_minutes": lambda v: self.ui.deadline_task_timeout.setText(v),
-            "concurrent_tasks": lambda v: self.ui.deadline_concurrent_tasks.setText(v),
+            "task_timeout_minutes": lambda v: self.ui.deadline_task_timeout.setText(to_text(v)),
+            "concurrent_tasks": lambda v: self.ui.deadline_concurrent_tasks.setText(to_text(v)),
             "limit_groups": lambda v: self.ui.deadline_limits.set_text(v),
             "machine_list": lambda v: self.ui.deadline_machine_list.set_text(v),
             "submit_allow_list_as_deny_list": lambda v: self.ui.deadline_machine_list_deny.setChecked(v),
@@ -2237,7 +2241,7 @@ class AppDialog(QtGui.QWidget):
             "delete_tmp_xml": lambda v: self.ui.deadline_delete_xml_file_after_export.setChecked(v),
             "missing_footage": lambda v: self.ui.deadline_continue_on_missing_footage.setChecked(v),
             "job_dependencies": lambda v: self.ui.deadline_dependencies.set_text(v),
-            "comment": lambda v: self.ui.deadline_comment.setText(v),
+            "comment": lambda v: self.ui.deadline_comment.setText(to_text(v)),
             "group_submissions": lambda v: self.ui.deadline_group_submissions.setChecked(v),
         }
 
