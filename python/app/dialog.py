@@ -25,10 +25,15 @@ import traceback
 # the code will be compatible with both PySide and PyQt.
 from sgtk.platform.qt import QtCore, QtGui
 from .ui.dialog import Ui_Dialog, ItemSelectionDialog
+import logging
 
 # standard toolkit logger
-logger = sgtk.platform.get_logger(__name__)
+#logger = sgtk.platform.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
+
+import ts_logger
+logger_manager = ts_logger.initialize_logger_manager(name="tk-ae-comp-to-render-queue", file_handler=False)
 
 def show_dialog(app_instance):
     """
@@ -76,9 +81,9 @@ class AppDialog(QtGui.QWidget):
         self.project_code = None
         self.step = None
 
-        logger.debug(f"Current Project: {self.current_project}")
-        logger.debug(f"Project ID: {self.project_id}")
-        logger.debug(f"AE Version: {self.ae_version}")
+        logger.info(f"Current Project: {self.current_project}")
+        logger.info(f"Project ID: {self.project_id}")
+        logger.info(f"AE Version: {self.ae_version}")
 
         # logging happens via a standard toolkit logger
         logger.info("Launching Add to render Queue Application...")
@@ -128,6 +133,7 @@ class AppDialog(QtGui.QWidget):
             project_data = self._app.shotgun.find_one("Project", [["id", "is", self.project_id]], ["sg_ae_render_pool", 'code'])
         except Exception as e:
             logger.error(f"Error getting project data: {e}")
+            logger.error("Traceback: %s", traceback.format_exc())
             project_data = {}
 
         self.ae_default_pool = project_data.get("sg_ae_render_pool", "none")
@@ -401,7 +407,7 @@ class AppDialog(QtGui.QWidget):
 
         # If no valid step is found, use given STEP list
         if not step_entity:
-            logger.debug("No valid step with publish types found, showing step picker")
+            logger.warning("No valid step with publish types found, showing step picker")
             self._show_step_picker()
             return
 
@@ -457,7 +463,7 @@ class AppDialog(QtGui.QWidget):
             if step:
                 self.ui.stepComboBox.addItem(step_name, step)
             else:
-                logger.warning("step '%s' not found in ShotGrid", step_name)
+                logger.warning(f"Step '{step_name}' not found in Shotgun, skipping in step picker")
         self.ui.stepComboBox.blockSignals(False)
         self.ui.stepComboBox.show()
 
@@ -721,7 +727,7 @@ class AppDialog(QtGui.QWidget):
         self.start_time = time.time()
         logger.debug("Start Render Queue Items Time: %s" % time.strftime("%H:%M:%S"))
 
-        logger.debug("Applying to render queue items")
+        logger.info("Applying changes to render queue items...")
         try:
             if self.ui.compTableWidget.rowCount() == 0:
                 self.alert_box("No render queue items", "Please add some render queue items to apply the changes to")
@@ -842,9 +848,9 @@ class AppDialog(QtGui.QWidget):
                             self.alert_box("Error",
                                            "There's some kind of issue with this template\n\n" + str(templateName) + '\n' + str(
                                                render_queue_template))
-                            logger.debug("Error applying template %s" % templateName)
-                            logger.debug("Exception: %s" % str(e))
-                            logger.debug(traceback.format_exc())
+                            logger.error("Error applying template %s" % templateName)
+                            logger.error("Exception: %s" % str(e))
+                            logger.error(traceback.format_exc())
                             statusItem.setIcon(self.ui.errorIcon)
                             statusItem.setToolTip("Template Not Applied | Error")
                             includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
@@ -919,7 +925,7 @@ class AppDialog(QtGui.QWidget):
                         step_idx += 1
                         self.update_progress_bar(step_idx, primary=False)
 
-                        logger.debug("Render Queue Item for: %s has been updated" % render_queue_item.comp.name)
+                        logger.confirmation(f"Applied template '{templateName}' to comp '{render_queue_item.comp.name}'")
                         count += 1
                         statusItem = self.ui.compTableWidget.item(row, 1)
                         statusItem.setIcon(self.ui.clearIcon)
@@ -949,10 +955,8 @@ class AppDialog(QtGui.QWidget):
             self.refresh_table_item_data()
             self.toggle_buttons()
 
-            logger.debug("Table item data refreshed after apply.")
-            logger.debug("Finish Time: %s" % time.strftime("%H:%M:%S"))
-            logger.debug("Total Time: %s" % (time.time() - self.start_time))
-            logger.debug("Total Render Queue Items Updated: %s" % count)
+            elapsed_time = time.time() - self.start_time if hasattr(self, 'start_time') else 0
+            logger.debug(f"Template application complete: {count} comps updated in {elapsed_time:.1f} seconds")
 
     def _run_jsx_manifest_generation(self, comp_identifiers, jsx_script_path):
         """
@@ -1175,11 +1179,11 @@ class AppDialog(QtGui.QWidget):
 
         # If there are rows in the table
         if self.ui.compTableWidget.rowCount() == 0:
-            self.warning_box("No render queue items available",
-                             "Please add some render queue items or refresh the table to Render the current items")
-            return False
+             self.warning_box("No render queue items available",
+                              "Please add some render queue items or refresh the table to Render the current items")
+             return False
 
-        logger.debug("All Checks passed, proceeding with Render")
+        logger.confirmation("All render checks passed, proceeding with local render")
 
         save_project = QtGui.QMessageBox.question(
             self,
@@ -1191,7 +1195,7 @@ class AppDialog(QtGui.QWidget):
 
         if save_project == QtGui.QMessageBox.Yes:
             self.adobe.app.project.save()
-            logger.info('Project saved')
+            logger.confirmation("Project saved successfully")
         else:
             return False
 
@@ -1256,16 +1260,16 @@ class AppDialog(QtGui.QWidget):
                 self.update_progress_bar(int(current_step / total_steps * 100))
 
                 try:
-                    logger.debug("Generating project manifest file...")
+                    logger.info("Generating project manifest file...")
 
                     self.update_progress_bar_format(f"Generating project manifest for {compName}...")
                     self.generate_project_manifest_file_jsx_threaded(render_queue_item, render_scene_file_path)
-                    logger.debug("Project manifest file generated for render queue item: %s" % compName)
+                    logger.confirmation(f"Project manifest generated for comp '{compName}'")
 
 
-                    logger.debug("Generating manifest file for render queue item: %s" % compName)
-                    self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path, publish_type_entity)
-                    logger.debug("Manifest file generated for render queue item: %s" % compName)
+                    #logger.info("Generating manifest file for render queue item: %s" % compName)
+                    #self.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path, publish_type_entity)
+                    #logger.debug("Manifest file generated for render queue item: %s" % compName)
 
                 except Exception as e:
                     logger.error("Failed to generate manifest file: %s" % e)
@@ -1289,7 +1293,7 @@ class AppDialog(QtGui.QWidget):
                 try:
                     logger.debug("Copying project file to render scene location: %s" % render_scene_file_path)
                     shutil.copy(self.adobe.app.project.file.fsName, render_scene_file_path)
-                    logger.info('Copy created: %s' % render_scene_file_path)
+                    logger.confirmation(f"Render scene backup created at '{render_scene_file_path}'")
 
                 except Exception as e:
                     logger.error("Failed to create render scene backup: %s" % e)
@@ -1307,7 +1311,7 @@ class AppDialog(QtGui.QWidget):
                 self.update_progress_bar(int(current_step / total_steps * 100))
 
                 # Log
-                logger.debug("Render Queue Item for: %s has been processed" % render_queue_item.comp.name)
+                logger.confirmation(f"Render scene prepared for comp '{render_queue_item.comp.name}' - ready for local render")
                 count += 1
 
                 # Update the status icon
@@ -1318,7 +1322,7 @@ class AppDialog(QtGui.QWidget):
             else:
                 # Change the render queue item status to UNQUEUED if unchecked
                 render_queue_item.render = False # Set to unqueued
-                logger.debug("Render Queue Item for: %s has been set to UNQUEUED" % render_queue_item.comp.name)
+                logger.info(f"Comp '{render_queue_item.comp.name}' excluded from local render (include checkbox unchecked)")
 
                 # Update the status icon
                 statusItem = self.ui.compTableWidget.item(row, 1)
@@ -1336,7 +1340,8 @@ class AppDialog(QtGui.QWidget):
         self.hide_progress_bar()
 
         self.toggle_buttons()
-        logger.debug("Total Render Queue Items Processed: %s" % count)
+        elapsed_time = time.time() - self.start_time if hasattr(self, 'start_time') else 0
+        logger.info(f"Local render prep complete: {count} items processed in {elapsed_time:.1f} seconds")
 
         return True
 
@@ -1346,7 +1351,7 @@ class AppDialog(QtGui.QWidget):
             This is to help clean up the render
 
         """
-        logger.debug("Clearing completed render queue items")
+        logger.info("Clearing completed render queue items")
 
         renderQueue = self.adobe.app.project.renderQueue
 
@@ -1356,11 +1361,11 @@ class AppDialog(QtGui.QWidget):
             for i in range(renderQueue.numItems, 0, -1):
                 item = renderQueue.item(i)
                 if item.status == self.adobe.RQItemStatus.DONE or item.status == self.adobe.RQItemStatus.USER_STOPPED:
-                    logger.debug("Removing render queue item: %s" % item.comp.name)
+                    logger.debug(f"Removing completed render queue item: '{item.comp.name}'")
                     item.remove()
                     count += 1
 
-        logger.debug("Clear Render Queue Items Processed: %s" % count)
+        logger.confirmation(f"Cleared {count} completed render queue items from the render queue")
 
         # Refresh Table
         self.create_table_entries()
@@ -1531,7 +1536,7 @@ class AppDialog(QtGui.QWidget):
         self.adobe.app.project.renderQueue.showWindow(True)
 
         # Render the current render queue items
-        logger.debug("Starting render of current render queue items")
+        logger.confirmation("Starting local render of prepared queue items")
         self.adobe.app.project.renderQueue.renderAsync()
 
     def run_project_checks(self):
@@ -1560,7 +1565,7 @@ class AppDialog(QtGui.QWidget):
             self.warning_box("No render queue items", "Please add some render queue items to render")
             return False
 
-        logger.debug("Project Checks passed, proceeding")
+        logger.confirmation("Project Checks passed, proceeding")
 
         return True
 
@@ -1635,6 +1640,8 @@ class AppDialog(QtGui.QWidget):
             Returns:
                 The output location for the render queue item or render scene file path
         """
+        logger.debug("Getting ShotGrid template")
+
         template_file_name = os.path.basename(render_queue_template)
         logger.debug("Using template file name: %s" % template_file_name)
         # Check if the template is a movie format or treat it as a sequence
@@ -1717,7 +1724,7 @@ class AppDialog(QtGui.QWidget):
         importedProject = self.import_preset_project(render_queue_template)
 
         if not importedProject:
-            logger.debug("Failed to import preset project for template: %s" % templateName)
+            logger.error("Failed to import preset project for template: %s" % templateName)
             return False
 
         logger.debug("Preset project imported for template: %s" % templateName)
@@ -1725,7 +1732,7 @@ class AppDialog(QtGui.QWidget):
         # Get preset render queue item
         presetRenderQueueItem = self.find_render_queue_item_by_comp_name('PRESET')
         if presetRenderQueueItem is None:
-            logger.debug("No preset render queue item found in imported project")
+            logger.error("No preset render queue item found in imported project for template: %s" % templateName)
             return False
 
         presetRenderQueueItem.outputModule(1).saveAsTemplate(templateName)
@@ -1892,6 +1899,7 @@ class AppDialog(QtGui.QWidget):
             return
 
         self._is_propagating_table_edit = True
+        logger.info(f"Propagating cell change from row {source_row} to other selected rows in column {col}: {selected_rows}")
         try:
             for row in selected_rows:
                 if row == source_row:
@@ -2061,7 +2069,7 @@ class AppDialog(QtGui.QWidget):
             render_queue_item = item.data(QtCore.Qt.UserRole)
 
             # Jump to the comp
-            logger.debug("Jumping to comp: %s" % render_queue_item.comp.name)
+            logger.info("Jumping to comp: %s" % render_queue_item.comp.name)
             render_queue_item.comp.openInViewer()
 
     def remove_comp(self):
@@ -2073,7 +2081,7 @@ class AppDialog(QtGui.QWidget):
         """
         row = self.get_row_from_cursor()
         if row == -1:
-            logger.debug("Row is invalid")
+            logger.warning("Row is invalid")
             return
 
         item = self.ui.compTableWidget.item(row-1, 0)  # Get the item in the first column of the row
@@ -2082,7 +2090,7 @@ class AppDialog(QtGui.QWidget):
             render_queue_item = item.data(QtCore.Qt.UserRole)
 
             # Remove the comp
-            logger.debug("Removing comp: %s" % render_queue_item.comp.name)
+            logger.info("Removing comp: %s" % render_queue_item.comp.name)
             render_queue_item.remove()
             self.ui.compTableWidget.removeRow(row-1)
 
@@ -2098,16 +2106,17 @@ class AppDialog(QtGui.QWidget):
             self.alert_box("No comps selected", "Please select some comps to remove")
             return
 
-        logger.debug("Removing selected comps: %s" % selected_rows)
+        logger.info("Removing selected comps from render queue")
         # Remove the selected rows
         for row in selected_rows:
             item = self.ui.compTableWidget.item(row.row(), 0)
             render_queue_item = item.data(QtCore.Qt.UserRole)
 
+            logger.debug(f"Removing comp: '{render_queue_item.comp.name}'")
             render_queue_item.remove()
             self.ui.compTableWidget.removeRow(row.row())
 
-        logger.debug("Comps removed")
+            logger.confirmation(f"Removed {len(selected_rows)} comps from render queue")
 
     def match_selected_to_current_row(self):
         """
@@ -2141,7 +2150,7 @@ class AppDialog(QtGui.QWidget):
             self.alert_box("No comps selected", "Please select some comps to apply the changes to")
             return
 
-        logger.debug("Updating selected rows to match current row: %s" % current_row)
+        logger.info("Updating selected rows to match current row: %s" % current_row)
         # Apply the changes to the selected rows
         for row in selected_rows:
             if row.row() != current_row:  # Avoid self-updating
@@ -2733,12 +2742,12 @@ class AppDialog(QtGui.QWidget):
         if save_project == QtGui.QMessageBox.No:
             return
 
-        logger.debug("Applying settings and submitting to Deadline")
+        logger.info("Applying settings and submitting to Deadline")
         self.apply_to_render_queue_items()
 
         # Save file
         self.adobe.app.project.save()
-        logger.debug("Project saved")
+        logger.confirmation("Project saved successfully for Deadline submission")
 
         # Submit files and save current submission settings
         self.submit_to_deadline_threaded()
@@ -2866,6 +2875,7 @@ class AppDialog(QtGui.QWidget):
         comp_names = []
         row_to_progress_idx = {}
 
+        logger.info("Preparing to submit selected comps to Deadline")
         for idx, row in enumerate(range(self.ui.compTableWidget.rowCount())):
             item = self.ui.compTableWidget.item(row, 0)
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
@@ -2873,6 +2883,9 @@ class AppDialog(QtGui.QWidget):
                 comp_rows.append(row)
                 comp_names.append(item.text())
                 row_to_progress_idx[row] = len(comp_rows) - 1
+            else:
+                logger.debug(f"Skipping row {row} for submission: Not selected or missing item")
+
         self.deadline_progress_dialog = DeadlineProgressDialog(comp_names, logger=logger, parent=self)
         self.deadline_progress_dialog.show()
 
@@ -2891,6 +2904,9 @@ class AppDialog(QtGui.QWidget):
         self.worker.item_update.connect(self.on_submission_item_update)
         self.worker.row_progress.connect(self.deadline_progress_dialog.update_progress)
         self.worker.row_done.connect(self.deadline_progress_dialog.mark_done)
+
+        logger.info(f"Submitting {len(comp_rows)} comps to Deadline: {comp_names}")
+        logger.info("Starting Deadline submission thread")
 
         # Start Thread
         self.thread.start()
@@ -2946,6 +2962,7 @@ class AppDialog(QtGui.QWidget):
         if error_message:
             self.message_box("Deadline Submission", f"Submission failed: {error_message}")
         else:
+            logger.confirmation(f"Deadline submission completed successfully - {num_successful_submissions} jobs submitted")
             self.message_box("Deadline Submission",
                              f"Submission completed successfully.\n\n{num_successful_submissions} jobs submitted to Deadline.")
         self.activateWindow()
@@ -2998,10 +3015,12 @@ class DeadlineSubmissionWorker(QtCore.QObject):
 
             if not project_check:
                 self.finished.emit("Project checks failed", 0)
+                logger.error("Project checks failed")
                 return
 
             if dialog.ui.compTableWidget.rowCount() == 0:
                 self.finished.emit("No render queue items available", 0)
+                logger.info("No render queue items available")
                 return
 
             current_deadline_settings = dialog.get_deadline_settings()
@@ -3011,12 +3030,15 @@ class DeadlineSubmissionWorker(QtCore.QObject):
             project_path = dialog.adobe.app.project.file.fsName
             num_rows = dialog.ui.compTableWidget.rowCount()
 
+            logger.info(f"Starting Deadline submission for {len(self.comp_rows)} comps out of {num_rows} total rows")
+
             for row in self.comp_rows:
                 progress_idx = self.row_to_progress_idx.get(row, None)
                 percent = int((row / max(1, num_rows)) * 100)
                 if progress_idx is not None:
                     self.row_progress.emit(progress_idx, 0, "Starting submission...")
 
+                logger.info(f"Processing row {row} for Deadline submission")
                 render_queue_item = dialog.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
                 includeCheckBox = dialog.ui.compTableWidget.item(row, 7)
                 statusItem = dialog.ui.compTableWidget.item(row, 1)
@@ -3038,12 +3060,13 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                     compName,
                     publish_type_entity
                 )
-                
+                logger.debug(f"Selected publish type entity for {compName}: {publish_type_entity}")
                 # Checks
 
                 # Item Included Check
                 if includeCheckBox.checkState() != QtCore.Qt.Checked:
                     msg = f"Skipped because 'Include' checkbox is not checked for comp '{compName}'."
+                    logger.warning(msg)
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
                     if progress_idx is not None:
@@ -3053,6 +3076,7 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                 # Item Status Check
                 if render_queue_item.status != dialog.adobe.RQItemStatus.QUEUED:
                     msg = f"Skipped because comp '{compName}' is not in QUEUED status (status={render_queue_item.status})."
+                    logger.warning(msg)
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
                     if progress_idx is not None:
@@ -3062,15 +3086,17 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                 # Item Spaces check
                 if compName.startswith(" ") or compName.endswith(" "):
                     msg = f"Comp name '{compName}' has spaces at the front or back. Skipping."
+                    logger.warning(msg)
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
                     if progress_idx is not None:
                         self.row_done.emit(progress_idx, False)
                     continue
 
-                # Iterm Special Character check
+                # Item Special Character check
                 if not re.match(r'^[a-zA-Z0-9_]+$', compName):
                     msg = f"Comp name '{compName}' has special characters. Only letters, numbers, and underscores are allowed. Skipping."
+                    logger.warning(msg)
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
                     if progress_idx is not None:
@@ -3086,12 +3112,16 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                     if progress_idx is not None:
                         self.row_progress.emit(progress_idx, 10, f"Copying project file for {compName}...")
                     if not os.path.exists(render_scene_file_directory):
+                        logger.debug(f"Creating directory for render scene backup: {render_scene_file_directory}")
                         os.makedirs(render_scene_file_directory, exist_ok=True)
+
+                    logger.info(f"Copying project file for {compName}...")
                     shutil.copy(dialog.adobe.app.project.file.fsName, render_scene_file_path)
 
                 except Exception as e:
                     msg = f"Failed to create render scene backup for comp '{compName}': {str(e)}"
                     deadline_error_message += msg + "\n"
+                    logger.error(msg)
                     self.item_update.emit(row, msg, False)
                     if progress_idx is not None:
                         self.row_done.emit(progress_idx, False)
@@ -3102,13 +3132,16 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                     if progress_idx is not None:
                         self.row_progress.emit(progress_idx, 30, f"Generating project manifest for {compName}...")
                     dialog.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path, publish_type_entity)
+                    logger.info(f"Project manifest generated for comp '{compName}'")
                     if progress_idx is not None:
                         self.row_progress.emit(progress_idx, 50, f"Generating comp manifest for {compName}...")
                     dialog.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path, publish_type_entity)
+                    logger.debug(f"Comp manifest generated for '{compName}'")
 
                 except Exception as e:
                     msg = f"Failed to generate manifest file for comp '{compName}': {str(e)}"
                     deadline_error_message += msg + "\n"
+                    logger.error(msg)
                     self.item_update.emit(row, msg, False)
                     if progress_idx is not None:
                         self.row_done.emit(progress_idx, False)
@@ -3129,12 +3162,15 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                     )
                     dialog.submit_render_queue_item_to_deadlineconnect(job_attrs, plugin_attrs)
                     num_successful_submissions += 1
+                    logger.confirmation(f"Submitted comp '{compName}' to Deadline with job '{job_attrs.get('Name', 'Unknown')}'")
                     self.item_update.emit(row, f"Submitted comp '{compName}' to Deadline successfully.", True)
                     if progress_idx is not None:
                         self.row_done.emit(progress_idx, True)
 
                 except Exception as e:
                     msg = f"Failed to submit comp '{compName}' to Deadline: {str(e)}"
+                    logger.error(msg)
+                    logger.error(traceback.format_exc())
                     deadline_error_message += msg + "\n"
                     self.item_update.emit(row, msg, False)
                     if progress_idx is not None:
@@ -3173,13 +3209,6 @@ class LocalProjectManifestWorker(QtCore.QObject):
             error_message = str(e)
             logger.error("Failed generating project manifest on local worker: %s" % error_message)
             logger.error(traceback.format_exc())
-
-        #try:
-        #    self.generate_manifest_file_for_queue_item_jsx(self.render_queue_item, self.render_scene_file_path)
-        #except Exception as e:
-        #    error_message += "\n" + str(e)
-        #    logger.error("Failed generating comp manifest on local worker: %s" % str(e))
-        #    logger.error(traceback.format_exc())
 
         self.finished.emit(error_message)
 

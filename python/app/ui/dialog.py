@@ -12,10 +12,12 @@
 from tank.platform.qt import QtCore, QtGui
 import os
 import sgtk
+import logging
+
+from ts_qt_utils.widgets import logger_widget
 
 # standard toolkit logger
-logger = sgtk.platform.get_logger(__name__)
-
+logger = logging.getLogger(__name__)
 
 class DraggableTableWidget(QtGui.QTableWidget):
     def __init__(self, parent=None):
@@ -642,12 +644,12 @@ class Ui_Dialog(object):
         self.stepContextLayout = QtGui.QHBoxLayout()
         self.stepContextLayout.setObjectName("stepContextLayout")
         self.stepContextLayout.setSpacing(5)
-        self.stepContextLayout.setContentsMargins(0, 0, 0, 0)
-        
+        self.stepContextLayout.setContentsMargins(10, 5, 10, 5)
+
         self.stepValueLabel = QtGui.QLabel("")
         self.stepValueLabel.setObjectName("stepValueLabel")
         self.stepValueLabel.hide()
-        
+
         self.stepContextLabel = QtGui.QLabel("Step:")
         self.stepContextLabel.setObjectName("stepContextLabel")
         self.stepContextLabel.setMinimumWidth(80)
@@ -664,8 +666,17 @@ class Ui_Dialog(object):
         self.stepContextLayout.addWidget(self.stepComboBox)
         self.stepContextLayout.addStretch()
 
+        # Step Context Frame
+        self.stepContextFrame = QtGui.QGroupBox()
+        self.stepContextFrame.setObjectName("stepContextFrame")
+        self.stepContextFrame.setTitle("Context Options")
+        self.stepContextFrame.setLayout(self.stepContextLayout)
+        self.stepContextFrame.setContentsMargins(0, 0, 0, 0)
+        self.stepContextFrame.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Fixed)
+        self.stepContextFrame.setAlignment(QtCore.Qt.AlignLeft)
+
         # Add task bar above the table
-        self.mainLayout.insertLayout(0, self.stepContextLayout)
+        self.mainLayout.insertWidget(0, self.stepContextFrame)
         
         # Comp Table
         self.compTableHeaders = ["Comp Name", "Status", "Frame Range", "Frame Output", "Render Template", "Publish Type", "Use Comp Name", "Include"]
@@ -1306,6 +1317,9 @@ class Ui_Dialog(object):
         self.sideMenuLayout.addStretch()
 
         self.mainLayout.addLayout(self.buttonsLayout)
+
+        self.logger_widget = logger_widget.LoggerWidget(title="Comp To Render Queue Log")
+        self.mainLayout.addWidget(self.logger_widget)
 
         self.horizontalLayout.addLayout(self.mainLayout)
         self.horizontalLayout.addWidget(self.sideMenuFrame)
