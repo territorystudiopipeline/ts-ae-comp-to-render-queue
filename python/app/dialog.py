@@ -2468,10 +2468,10 @@ class AppDialog(QtGui.QWidget):
         # Deadline needs OutputDirectoryN and OutputFilenameN as separate keys. deadlinecommand
         # splits a full path given in OutputFilenameN for you, but the DeadlineConnect / Web
         # Service submission does not, which left "Output Directory" empty in the Monitor.
-        job_attrs.update(self.build_deadline_output_attrs(
-            render_queue_item.outputModule(index + 1).file.fsName
-            for index in range(render_queue_item.numOutputModules)
-        ))
+        output_paths = []
+        for index in range(render_queue_item.numOutputModules):
+            output_paths.append(render_queue_item.outputModule(index + 1).file.fsName)
+        job_attrs.update(self.build_deadline_output_attrs(output_paths))
 
         # Movie/Chunk settings
         if is_movie:
