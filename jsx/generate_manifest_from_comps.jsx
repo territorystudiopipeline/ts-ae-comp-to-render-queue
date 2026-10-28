@@ -40,6 +40,11 @@ try {
 // Error logging helper
 function logError(msg) {
     try {
+        if ($.global.TS_JSX_WARNINGS) {
+            $.global.TS_JSX_WARNINGS.push(String(msg));
+        }
+    } catch (e) {}
+    try {
         var logFile;
         if (app.project && app.project.file && app.project.file.parent) {
             logFile = new File(app.project.file.parent.fsName + "/ae_manifest_error.log");
@@ -51,6 +56,18 @@ function logError(msg) {
             logFile.close();
         }
     } catch (e) {}
+}
+
+// Comp identifiers passed in by the Python app (see python/app/afterfx.py). When the
+// script is run through the bootstrap, $.global.TS_JSX_ARGS = {comps: [...]} and the
+// _comp_identifiers.json lookup is skipped. Returns null when run on its own.
+function getPassedCompIdentifiers() {
+    try {
+        if ($.global.TS_JSX_ARGS && $.global.TS_JSX_ARGS.comps) {
+            return $.global.TS_JSX_ARGS.comps;
+        }
+    } catch (e) {}
+    return null;
 }
 
 // Safe file writing helper
@@ -73,6 +90,10 @@ function safeWriteFile(filePath, data) {
 
 // Try to read comp identifiers from a JSON file in the project folder
 function getCompsToAnalyzeFromJson() {
+    var passed = getPassedCompIdentifiers();
+    if (passed) {
+        return passed;
+    }
     var compsList = null;
     var projectFile = app.project.file;
     if (!projectFile) {

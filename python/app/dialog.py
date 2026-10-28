@@ -7,16 +7,17 @@
 # By accessing, using, copying or modifying this work you indicate your
 # agreement to the Shotgun Pipeline Toolkit Source Code License. All rights
 # not expressly granted therein are reserved by Shotgun Software Inc.
+import getpass
+import logging
+import ntpath
+import posixpath
 import shutil
 import subprocess
-import warnings
 
 import sgtk
 import os
 import re
 import time
-import json
-import sys
 from contextlib import contextmanager
 import traceback
 
@@ -24,6 +25,7 @@ import traceback
 # the code will be compatible with both PySide and PyQt.
 from sgtk.platform.qt import QtCore, QtGui
 from .ui.dialog import Ui_Dialog, ItemSelectionDialog
+from . import afterfx
 
 # standard toolkit logger
 logger = sgtk.platform.get_logger(__name__)
@@ -93,6 +95,19 @@ class AppDialog(QtGui.QWidget):
         self.deadline_port = self._app.get_setting('deadline_port')
         self.qsettings_ignore_list = self._app.get_setting('qsettings_ignore_list')
         self.render_preset_movie_formats = self._app.get_setting('render_preset_movie_formats')
+
+        # After Effects script runs (AfterFX.com -ro). Both settings are optional.
+        self._afterfx_path = None
+        self.afterfx_timeout = self._app.get_setting('afterfx_timeout', 0) or afterfx.DEFAULT_TIMEOUT
+
+        # Background work tracking (see is_busy / closeEvent)
+        self._busy_count = 0
+        self._submit_thread = None
+        self._submit_worker = None
+        self.deadline_progress_dialog = None
+        self._submission_prep_errors = ""
+        # Logger for worker threads; records are handed to the GUI thread (see GuiThreadLogRelay)
+        self.thread_log = GuiThreadLogRelay(logger, parent=self)
 
         # Deadline variables
         self.deadline_error_message = ""
@@ -484,6 +499,47 @@ class AppDialog(QtGui.QWidget):
             self.create_table_entries()
             self.toggle_buttons()
 
+    def find_render_queue_item_for_row(self, row):
+        """
+            Fetch a fresh render queue item for a table row.
+
+            The table only lists QUEUED / NEEDS_OUTPUT items, and rows can be removed from it,
+            so table row N is not render queue item N+1 whenever the queue holds anything else
+            (e.g. a DONE item from an earlier render). Use row+1 only when its comp matches the
+            row, otherwise take the matching renderable item with that comp name.
+
+            Returns:
+                The render queue item, or None if it can't be found.
+        """
+        tableItem = self.ui.compTableWidget.item(row, 0)
+        if tableItem is None:
+            return None
+        comp_name = tableItem.text()
+        render_queue = self.adobe.app.project.renderQueue
+        renderable = (self.adobe.RQItemStatus.QUEUED, self.adobe.RQItemStatus.NEEDS_OUTPUT)
+
+        if row + 1 <= render_queue.numItems:
+            candidate = render_queue.item(row + 1)
+            if candidate.comp.name == comp_name and candidate.status in renderable:
+                return candidate
+
+        # Same comp may be queued more than once: count which occurrence this row is.
+        occurrence = sum(
+            1 for r in range(row)
+            if self.ui.compTableWidget.item(r, 0) is not None
+            and self.ui.compTableWidget.item(r, 0).text() == comp_name
+        )
+        seen = 0
+        for i in range(1, render_queue.numItems + 1):
+            candidate = render_queue.item(i)
+            if candidate.status in renderable and candidate.comp.name == comp_name:
+                if seen == occurrence:
+                    return candidate
+                seen += 1
+
+        logger.warning("No render queue item found for row %s (%s)" % (row, comp_name))
+        return None
+
     def refresh_table_item_data(self):
         """
         Refresh only the UserRole data for each table row, preserving status icons/tooltips.
@@ -491,10 +547,10 @@ class AppDialog(QtGui.QWidget):
         for row in range(self.ui.compTableWidget.rowCount()):
             try:
                 # Fetch the latest render queue item for this row
-                render_queue_item = self.adobe.app.project.renderQueue.item(row + 1)
+                render_queue_item = self.find_render_queue_item_for_row(row)
                 # Update the UserRole data for the first column (comp name)
                 tableItem = self.ui.compTableWidget.item(row, 0)
-                if tableItem is not None:
+                if tableItem is not None and render_queue_item is not None:
                     tableItem.setData(QtCore.Qt.UserRole, render_queue_item)
             except Exception as e:
                 logger.error(f"Failed to refresh UserRole data for row {row}: {e}")
@@ -604,7 +660,9 @@ class AppDialog(QtGui.QWidget):
                         try:
                             try:
                                 # Refetch item and comp to make sure its note a stale reference
-                                render_queue_item = self.adobe.app.project.renderQueue.item(row + 1)
+                                render_queue_item = self.find_render_queue_item_for_row(row)
+                                if render_queue_item is None:
+                                    raise RuntimeError("Render queue item for '%s' not found" % compName)
                                 comp = render_queue_item.comp
 
                             except Exception as refetch_exc:
@@ -738,178 +796,115 @@ class AppDialog(QtGui.QWidget):
             logger.debug("Total Time: %s" % (time.time() - self.start_time))
             logger.debug("Total Render Queue Items Updated: %s" % count)
 
-    def _run_jsx_manifest_generation(self, comp_identifiers, jsx_script_path):
+    ####################################################################################################
+    # After Effects scripts (AfterFX.com -ro)
+    #
+    # Anything touching self.adobe (the AE RPC bridge) or a widget must run on the GUI thread.
+    # build_manifest_job() gathers everything up front on the GUI thread; run_manifest_job()
+    # only writes files and runs AfterFX.com, so it is safe in a worker thread.
+    ####################################################################################################
+    JSX_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "jsx"))
+    PROJECT_MANIFEST_JSX = "generate_manifest_for_all_comps.jsx"
+    COMP_MANIFEST_JSX = "generate_manifest_from_comps.jsx"
+
+    def get_afterfx_path(self):
         """
-            Shared helper to write comp_identifiers to _comp_identifiers.json and run the specified JSX script.
+            The AfterFX.com matching the running After Effects (GUI thread, cached).
+
+            Raises:
+                afterfx.AfterFXError: If it can't be found.
+        """
+        if not self._afterfx_path:
+            self._afterfx_path = afterfx.find_afterfx(self.ae_version, self._app.get_setting("afterfx_path", ""))
+            logger.debug("Using AfterFX: %s" % self._afterfx_path)
+        return self._afterfx_path
+
+    def build_manifest_job(self, render_queue_item, render_scene_file_path, project_manifest=True, comp_manifest=False):
+        """
+            Collect what is needed to generate manifests for a render queue item. GUI thread only.
 
             Arguments:
-                comp_identifiers (list): A list of comp_identifiers to run the JSX script.
-                jsx_script_path (str): The path to the JSX script to be run.
+                render_queue_item (RenderQueueItem): The render queue item.
+                render_scene_file_path (str): The render scene the manifests describe; they are
+                    written to its folder.
+                project_manifest (bool): Generate project_manifest.json for all comps.
+                comp_manifest (bool): Generate <comp>_manifest.json for this comp.
 
             Returns:
-            None
+                dict: A plain-data job for run_manifest_job().
         """
-        def _after_effects_version_to_year(major_version):
-            """
-                Converts the major version number of After Effects to the corresponding year-based version string.
-                 - For versions 24 and above, it converts to a year-based version (e.g., 24 to 2024).
+        comp = render_queue_item.comp
+        comp_identifiers = [{
+            "name": comp.name,
+            "id": getattr(comp, "id", None),
+            "output_location": os.path.dirname(render_scene_file_path),
+        }]
 
-                Arguments:
-                    major_version (str): The major version number of After Effects as a string.
-                Returns:
-                    str: The year-based version string for After Effects if major version is 24 or above,
-                    otherwise returns the original major version string.
-            """
+        scripts = []
+        if project_manifest:
+            scripts.append(os.path.join(self.JSX_DIR, self.PROJECT_MANIFEST_JSX))
+        if comp_manifest:
+            scripts.append(os.path.join(self.JSX_DIR, self.COMP_MANIFEST_JSX))
+
+        return {
+            "afterfx_path": self.get_afterfx_path(),
+            "scripts": scripts,
+            "args": {"comps": comp_identifiers},
+            "timeout": self.afterfx_timeout,
+        }
+
+    @staticmethod
+    def run_manifest_job(job, log=None):
+        """
+            Run the manifest scripts of a job from build_manifest_job(). Safe in any thread
+            when given a thread-safe log (see GuiThreadLogRelay).
+
+            Raises:
+                afterfx.AfterFXError: If a script fails, never runs or times out.
+        """
+        for script_path in job["scripts"]:
+            afterfx.run_script(job["afterfx_path"], script_path, job["args"], timeout=job["timeout"], log=log)
+
+    def run_blocking_in_thread(self, func):
+        """
+            Run func() in a worker thread while keeping the UI responsive, and wait for it.
+            func must not touch widgets or self.adobe. Its exception, if any, is re-raised here.
+
+            Closing the window is refused while this runs (see closeEvent), so the thread
+            can't outlive the widgets.
+        """
+        outcome = {"error": None, "traceback": ""}
+
+        def _call():
             try:
-                major_version_int = int(major_version)
-                if major_version_int >= 24:
-                    return str(2000 + major_version_int)
-                else:
-                    return major_version
-            except ValueError:
-                logger.error(f"Unable to parse After Effects version: {self.ae_version}")
-                return major_version
+                func()
+            except Exception as exc:
+                # No logging here: this runs in the worker thread.
+                outcome["error"] = exc
+                outcome["traceback"] = traceback.format_exc()
 
-        # Validate comp_identifiers
-        if not isinstance(comp_identifiers, list) or not comp_identifiers:
-            logger.error("comp_identifiers must be a non-empty list.")
-            return
-        required_fields = ("name", "id", "output_location")
-        for idx, comp in enumerate(comp_identifiers):
-            if not isinstance(comp, dict):
-                logger.error(f"comp_identifiers[{idx}] is not a dict: {comp}")
-                return
-            for field in required_fields:
-                if field not in comp or comp[field] in (None, ""):
-                    logger.error(f"comp_identifiers[{idx}] missing or empty required field '{field}': {comp}")
-                    return
-
-        # Check After Effects project file existence
-        current_comp_file_path = getattr(self.adobe.app.project.file, 'fsName', None)
-        if not current_comp_file_path or not os.path.isfile(current_comp_file_path):
-            logger.error(f"After Effects project file not found or invalid: {current_comp_file_path}")
-            return
-
-        # Check directory writability for _comp_identifiers.json
-        comp_id_dir = os.path.dirname(current_comp_file_path)
-        if not os.path.isdir(comp_id_dir):
-            logger.error(f"Directory for comp identifiers does not exist: {comp_id_dir}")
-            return
-        if not os.access(comp_id_dir, os.W_OK):
-            logger.error(f"No write permission for directory: {comp_id_dir}")
-            return
-
-        # Write comp identifier JSON file next to the project file
-        comp_id_json_path = os.path.join(comp_id_dir, "_comp_identifiers.json")
-        try:
-            with open(comp_id_json_path, "w") as f:
-                json.dump(comp_identifiers, f, indent=4)
-        except Exception as e:
-            logger.error(f"Failed to write comp identifiers JSON: {e}")
-            return
-
-        major_version = str(self.ae_version).split(".")[0]
-        after_effects_version = _after_effects_version_to_year(major_version)
-        afterfx_path = r"C:\Program Files\Adobe\Adobe After Effects %s\Support Files\AfterFX.com" % after_effects_version
-
-        # Check AfterFX executable existence
-        if not os.path.isfile(afterfx_path):
-            logger.error(f"AfterFX executable not found: {afterfx_path}")
-            return
-
-        command = [afterfx_path, "-ro", jsx_script_path]
-
-        logger.info(f"Running command: {command}")
-
-        try:
-            result = subprocess.run(command, check=True, capture_output=True, text=True)
-            if result.returncode != 0:
-                logger.error(f"JSX script exited with non-zero code: {result.returncode}", file=sys.stderr)
-                logger.error(f"Stdout: {result.stdout}", file=sys.stderr)
-                logger.error(f"Stderr: {result.stderr}", file=sys.stderr)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"JSX script failed to execute: {e}", file=sys.stderr)
-            logger.error(f"Stdout: {e.stdout}", file=sys.stderr)
-            logger.error(f"Stderr: {e.stderr}", file=sys.stderr)
-        except OSError as e:
-            logger.error(f"Failed to run After Effects JSX script: {e}", file=sys.stderr)
-            logger.error(f"Command: {' '.join(command)}")
-
-    def generate_manifest_file_for_queue_item_jsx(self, render_queue_item, render_scene_file_path):
-        """
-            Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file.
-
-            Arguments:
-                render_queue_item (RenderQueueItem): The render queue item to generate manifest file.
-                render_scene_file_path (str): The path to the scene file to generate manifest file.
-        """
-        comp = render_queue_item.comp
-        comp_identifier = {
-            "name": comp.name,
-            "id": getattr(comp, 'id', None),
-            "output_location": os.path.dirname(render_scene_file_path)
-        }
-        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../jsx/generate_manifest_from_comps.jsx'))
-
-        # Check jsx file exits
-        if jsx_script_path is None or not os.path.exists(jsx_script_path):
-            logger.error(f"JSX script not found at path: {jsx_script_path}")
-            return
-
-        self._run_jsx_manifest_generation([comp_identifier], jsx_script_path)
-
-    def generate_project_manifest_file_jsx(self, render_queue_item, render_scene_file_path):
-        """
-            Creates a JSON file with comp name and id, then executes the JSX script to generate the manifest file for the entire project.
-
-            Arguments:
-                render_queue_item (RenderQueueItem): The render queue item to generate manifest file.
-                render_scene_file_path (str): The path to the scene file to generate manifest file.
-        """
-        comp = render_queue_item.comp
-        comp_identifier = {
-            "name": comp.name,
-            "id": getattr(comp, 'id', None),
-            "output_location": os.path.dirname(render_scene_file_path)
-        }
-        jsx_script_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../jsx/generate_manifest_for_all_comps.jsx'))
-
-        if jsx_script_path is None or not os.path.exists(jsx_script_path):
-            logger.error(f"JSX script not found at path: {jsx_script_path}")
-            return
-
-        self._run_jsx_manifest_generation([comp_identifier], jsx_script_path)
-
-    def generate_project_manifest_file_jsx_threaded(self, render_queue_item, render_scene_file_path):
-        """
-            Run project-level manifest generation in a worker thread and block until completion.
-
-            Arguments:
-                render_queue_item (RenderQueueItem): The render queue item to generate manifest file.
-                render_scene_file_path (str): The path to the scene file to generate manifest file.
-        """
         thread = QtCore.QThread(self)
-        worker = LocalProjectManifestWorker(self, render_queue_item, render_scene_file_path)
+        worker = _CallableWorker(_call)
         worker.moveToThread(thread)
+        loop = QtCore.QEventLoop(self)
 
-        result = {"error": ""}
-        wait_loop = QtCore.QEventLoop()
-
-        def _on_finished(error_message):
-            result["error"] = error_message or ""
-            wait_loop.quit()
-
-        worker.finished.connect(_on_finished)
         thread.started.connect(worker.run)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(loop.quit)
 
-        thread.start()
-        wait_loop.exec_()
+        self._busy_count += 1
+        try:
+            thread.start()
+            loop.exec_()
+        finally:
+            thread.wait()
+            thread.deleteLater()
+            self._busy_count -= 1
 
-        if result["error"]:
-            raise RuntimeError(result["error"])
+        if outcome["error"] is not None:
+            logger.error(outcome["traceback"])
+            raise outcome["error"]
 
     def process_queue_items_for_render(self):
         """
@@ -938,15 +933,12 @@ class AppDialog(QtGui.QWidget):
 
         logger.debug("All Checks passed, proceeding with Render")
 
-        save_project = QtGui.QMessageBox.question(
-            self,
+        save_project = self.question_box(
             "Save Project",
             "Saving is required before rendering. Do you want to save the current project?",
-            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
-            QtGui.QMessageBox.Yes,
         )
 
-        if save_project == QtGui.QMessageBox.Yes:
+        if save_project:
             self.adobe.app.project.save()
             logger.info('Project saved')
         else:
@@ -1004,7 +996,10 @@ class AppDialog(QtGui.QWidget):
                     logger.debug("Generating project manifest file...")
 
                     self.update_progress_bar_format(f"Generating project manifest for {compName}...")
-                    self.generate_project_manifest_file_jsx_threaded(render_queue_item, render_scene_file_path)
+                    # Gather on the GUI thread, then run AfterFX.com off it so the UI stays live.
+                    manifest_job = self.build_manifest_job(render_queue_item, render_scene_file_path)
+                    self.run_blocking_in_thread(
+                        lambda job=manifest_job: self.run_manifest_job(job, log=self.thread_log))
                     logger.debug("Project manifest file generated for render queue item: %s" % compName)
 
                 except Exception as e:
@@ -1261,7 +1256,13 @@ class AppDialog(QtGui.QWidget):
 
             returns: None
         """
-        ready_to_render = self.process_queue_items_for_render()
+        try:
+            ready_to_render = self.process_queue_items_for_render()
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            self.hide_progress_bar()
+            self.alert_box("Render", "Failed to prepare the render:\n\n%s" % e)
+            ready_to_render = False
 
         if not ready_to_render:
             self.toggle_buttons()
@@ -1304,6 +1305,53 @@ class AppDialog(QtGui.QWidget):
 
         return True
 
+    ####################################################################################################
+    # Dialog parenting
+    #
+    # Every dialog/message box this app creates is parented to the Toolkit window that
+    # engine.show_dialog() built around this widget (or, before that window exists, to the
+    # engine's dialog parent, the proxy window tk-aftereffects attaches to After Effects).
+    # Never to None and never to a hidden, not-yet-parented widget: an ownerless top-level
+    # window is what lets Qt / the Python process lose track of who owns a dialog, which can
+    # take the Toolkit panel down with it. Widgets are also only ever created on the GUI thread.
+    ####################################################################################################
+    def dialog_parent(self):
+        """
+            The widget to parent dialogs to.
+        """
+        window = self.window()
+        if window is not None and window is not self:
+            return window
+        try:
+            engine_parent = self._app.engine._get_dialog_parent()
+            if engine_parent is not None:
+                return engine_parent
+        except Exception as e:
+            logger.debug("Engine dialog parent not available: %s" % e)
+        return self
+
+    @staticmethod
+    def _on_gui_thread():
+        app = QtCore.QCoreApplication.instance()
+        return app is not None and QtCore.QThread.currentThread() == app.thread()
+
+    def _exec_message_box(self, icon, title, text, buttons=QtGui.QMessageBox.Ok, default_button=QtGui.QMessageBox.Ok):
+        """
+            Show a parented, modal message box and return the clicked button.
+            Off the GUI thread it only logs (creating widgets there crashes Qt).
+        """
+        if not self._on_gui_thread():
+            logger.error("Message box requested off the GUI thread, not shown: %s - %s" % (title, text))
+            return QtGui.QMessageBox.NoButton
+
+        box = QtGui.QMessageBox(icon, title, str(text), buttons, self.dialog_parent())
+        box.setDefaultButton(default_button)
+        box.setWindowModality(QtCore.Qt.WindowModal)
+        try:
+            return box.exec_()
+        finally:
+            box.deleteLater()
+
     def alert_box(self, title, text):
         """
             Display an alert box
@@ -1314,13 +1362,8 @@ class AppDialog(QtGui.QWidget):
 
             Returns: None
         """
-        QtGui.QMessageBox.critical(
-            self,
-            title,
-            str(text),
-            buttons=QtGui.QMessageBox.Ok,
-            defaultButton=QtGui.QMessageBox.Ok,
-        )
+        logger.debug("Displaying Alert Box: %s" % text)
+        self._exec_message_box(QtGui.QMessageBox.Critical, title, text)
 
     def warning_box(self, title, text):
         """
@@ -1333,14 +1376,7 @@ class AppDialog(QtGui.QWidget):
             Returns: None
         """
         logger.debug("Displaying Warning Box: %s" % text)
-        # Display the warning box
-        QtGui.QMessageBox.warning(
-            self,
-            title,
-            str(text),
-            buttons=QtGui.QMessageBox.Ok,
-            defaultButton=QtGui.QMessageBox.Ok,
-        )
+        self._exec_message_box(QtGui.QMessageBox.Warning, title, text)
 
     def message_box(self, title, text):
         """
@@ -1353,14 +1389,47 @@ class AppDialog(QtGui.QWidget):
             Returns: None
         """
         logger.debug("Displaying Message Box: %s" % text)
-        # Display the message box
-        QtGui.QMessageBox.information(
-            self,
-            title,
-            str(text),
-            buttons=QtGui.QMessageBox.Ok,
-            defaultButton=QtGui.QMessageBox.Ok,
+        self._exec_message_box(QtGui.QMessageBox.Information, title, text)
+
+    def question_box(self, title, text):
+        """
+            Ask a Yes/No question (Yes is the default).
+
+            Returns:
+                bool: True if the user clicked Yes.
+        """
+        result = self._exec_message_box(
+            QtGui.QMessageBox.Question, title, text,
+            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No, QtGui.QMessageBox.Yes,
         )
+        return result == QtGui.QMessageBox.Yes
+
+    def is_busy(self):
+        """
+            True while background work that references this window is still running.
+        """
+        submit_thread = getattr(self, "_submit_thread", None)
+        try:
+            submit_running = submit_thread is not None and submit_thread.isRunning()
+        except RuntimeError:  # C++ object already deleted
+            submit_running = False
+        return self._busy_count > 0 or submit_running
+
+    def closeEvent(self, event):
+        """
+            Refuse to close while a worker thread is running: destroying a running QThread,
+            or the widgets its signals update, aborts the whole Python/Qt process.
+            The Toolkit dialog wrapper honours an ignored close event.
+        """
+        if self.is_busy():
+            self.warning_box(
+                "Please wait",
+                "Still working (submitting to Deadline or generating manifests).\n"
+                "Close the window once it has finished.",
+            )
+            event.ignore()
+            return
+        super(AppDialog, self).closeEvent(event)
 
     def get_shotgrid_template(self, render_queue_template, use_comp_name=False, comp_name=None, render_scene=False):
         """
@@ -1528,6 +1597,8 @@ class AppDialog(QtGui.QWidget):
         self.ui.renderButton.setEnabled(state)
         self.ui.refreshButton.setEnabled(state)
         self.ui.clearButton.setEnabled(state)
+        # The table too: rows are addressed by index while work runs in the background.
+        self.ui.compTableWidget.setEnabled(state)
 
     #########################
     # Propagation Methods
@@ -2125,6 +2196,8 @@ class AppDialog(QtGui.QWidget):
 
         return deadlineCommand
 
+    DEADLINE_COMMAND_TIMEOUT = 60
+
     def call_deadline_command(self, arguments, hideWindow=True, readStdout=True):
         """
         Calls the Deadline command with specified arguments.
@@ -2140,29 +2213,36 @@ class AppDialog(QtGui.QWidget):
         deadlineCommand = self.get_deadline_command()
         if not deadlineCommand:
             logger.error("Deadline command not found.")
-            return None
+            return ""
 
         startupinfo = None
         creationflags = 0
         if os.name == 'nt' and hideWindow:
             startupinfo = subprocess.STARTUPINFO()
             startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-            creationflags = subprocess.CREATE_NEW_CONSOLE
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
         try:
-            logger.debug("Calling Deadline command: %s" % deadlineCommand)
+            logger.debug("Calling Deadline command: %s %s" % (deadlineCommand, arguments))
+            # Timeout so an unreachable repository can't freeze the UI (this runs on the GUI thread).
             result = subprocess.run(
                 [deadlineCommand] + arguments,
                 startupinfo=startupinfo,
                 creationflags=creationflags,
                 capture_output=readStdout,
-                text=True
+                text=True,
+                timeout=self.DEADLINE_COMMAND_TIMEOUT,
             )
+            if result.returncode != 0:
+                logger.warning("deadlinecommand %s exited with %s: %s" % (arguments, result.returncode, result.stderr))
             if readStdout:
-                return result.stdout
+                return result.stdout or ""
+        except subprocess.TimeoutExpired:
+            logger.error("deadlinecommand %s timed out after %ss" % (arguments, self.DEADLINE_COMMAND_TIMEOUT))
         except Exception as e:
             logger.error(f"Failed to execute Deadline command: {e}")
-            return None
+        # Callers parse the output, so never hand back None.
+        return ""
 
     ####################################
     # QSettings Functions
@@ -2256,7 +2336,36 @@ class AppDialog(QtGui.QWidget):
     ####################################
     # Deadline Submission
     ####################################
-    def build_deadline_job_and_plugin_dicts(self, render_queue_item, deadline_settings, project_path, layers, previous_job_id, version, render_file):
+    @staticmethod
+    def build_deadline_output_attrs(output_paths):
+        """
+            Build the OutputDirectoryN / OutputFilenameN job info entries Deadline uses to
+            show (and let you browse to) a job's output.
+
+            Arguments:
+                output_paths (iterable of str): Full native output paths, one per output module.
+                    AE frame tokens such as [####] are converted to Deadline's ####.
+
+            Returns:
+                dict: e.g. {"OutputDirectory0": "X:/renders/v001", "OutputFilename0": "comp.####.exr"}
+        """
+        attrs = {}
+        index = 0
+        for path in output_paths:
+            if not path:
+                continue
+            path = str(path).replace('[#', '#').replace('#]', '#')
+            path_module = ntpath if ("\\" in path or re.match(r"^[a-zA-Z]:", path)) else posixpath
+            directory, file_name = path_module.split(path)
+            if not directory or not file_name:
+                logger.warning("Skipping output path without a folder or file name: %s" % path)
+                continue
+            attrs[f"OutputDirectory{index}"] = directory
+            attrs[f"OutputFilename{index}"] = file_name
+            index += 1
+        return attrs
+
+    def build_deadline_job_and_plugin_dicts(self,render_queue_item, deadline_settings, project_path, layers, previous_job_id, version, render_file):
         """
         Builds the required job_attrs and plugin_attrs dictionaries for submitting a job to DeadlineConnect based on the provided render queue item and settings.
 
@@ -2272,9 +2381,11 @@ class AppDialog(QtGui.QWidget):
         Returns (job_attrs, plugin_attrs) for DeadlineConnect submission.
         """
         # Output Variables
+        # Note: ExtendScript File.name is only the (URI-encoded) file name, with no folder,
+        # so the full native path has to come from fsName.
         output_module = render_queue_item.outputModule(render_queue_item.numOutputModules)
-        output_file_name = output_module.file.name
-        output_folder = os.path.dirname(output_file_name)
+        output_file_path = output_module.file.fsName
+        output_file_name = os.path.basename(output_file_path)
         ae_project_name = os.path.basename(self.adobe.app.project.file.name)
         job_name = f"{self.project_name} - {ae_project_name} - {render_queue_item.comp.name} - {output_module.name}"
         start_frame = ""
@@ -2287,7 +2398,7 @@ class AppDialog(QtGui.QWidget):
         comp_name = render_queue_item.comp.name
         dependent_job_id = previous_job_id or ""
         dependent_comps = False
-        is_movie = any(output_file_name.endswith(ext) for ext in self.deadline_defaults["movie_formats"])
+        is_movie = any(output_file_name.lower().endswith("." + ext.lower()) for ext in self.deadline_defaults["movie_formats"])
 
         if override_frame_list or multi_machine:
             # Get the frame duration and start/end times
@@ -2317,7 +2428,7 @@ class AppDialog(QtGui.QWidget):
         job_attrs = {
             "Plugin": "AfterEffects",
             "Name": job_name,
-            "UserName": os.getlogin(),
+            "UserName": getpass.getuser(),
             "Comment": deadline_settings.get('comment', ''),
             "Department": deadline_settings.get('department', self.project_name or ''),
             "Group": deadline_settings.get('group', 'ae'),
@@ -2354,11 +2465,13 @@ class AppDialog(QtGui.QWidget):
             job_attrs["Frames"] = frame_list
 
         # Output files
-        for index in range(render_queue_item.numOutputModules):
-            output_module = render_queue_item.outputModule(index + 1)
-            key = f"OutputFilename{index}"
-            value = output_module.file.fsName.replace('[#', '#').replace('#]', '#')
-            job_attrs[key] = value
+        # Deadline needs OutputDirectoryN and OutputFilenameN as separate keys. deadlinecommand
+        # splits a full path given in OutputFilenameN for you, but the DeadlineConnect / Web
+        # Service submission does not, which left "Output Directory" empty in the Monitor.
+        job_attrs.update(self.build_deadline_output_attrs(
+            render_queue_item.outputModule(index + 1).file.fsName
+            for index in range(render_queue_item.numOutputModules)
+        ))
 
         # Movie/Chunk settings
         if is_movie:
@@ -2387,7 +2500,9 @@ class AppDialog(QtGui.QWidget):
             "ContinueOnMissingFootage": deadline_settings.get('missing_footage', False),
         }
         if deadline_settings.get('include_output_path', False):
-            plugin_attrs["Output"] = output_folder
+            # The AfterEffects plugin passes this to aerender -output, so it must be the full
+            # output file path (as the stock Deadline submitter writes it), not a folder.
+            plugin_attrs["Output"] = output_file_path
         if multi_machine:
             plugin_attrs["MultiMachineMode"] = True
             plugin_attrs["MultiMachineStartFrame"] = start_frame
@@ -2419,44 +2534,20 @@ class AppDialog(QtGui.QWidget):
                 job_attrs (dict): The dictionary containing job attributes for Deadline submission.
                 plugin_attrs (dict): The dictionary containing plugin attributes for Deadline submission.
         """
-        try:
-            import Deadline.DeadlineConnect as Connect
-            host = self.deadline_host
-            port = self.deadline_port
-            deadline = Connect.DeadlineCon(host, port)
-            job = deadline.Jobs.SubmitJob(job_attrs, plugin_attrs)
-            logger.info(f"Deadline submission results: {job}")
-
-            # If job is a dict and contains '_id', treat as success
-            if isinstance(job, dict) and '_id' in job:
-                logger.info(f"Submitted Job ID: {job['_id']}")
-
-            else:
-                # Otherwise, treat as error and raise
-                error_msg = f"Deadline submission error: {job}"
-                logger.error(error_msg)
-                raise Exception(error_msg)
-
-        except Exception as e:
-            logger.error(f"DeadlineConnect submission failed: {e}")
-            logger.error(traceback.format_exc())
-            raise
+        return submit_job_to_deadlineconnect(self.deadline_host, self.deadline_port, job_attrs, plugin_attrs)
 
     def apply_and_submit(self):
         """
             Apply the settings and submit to Deadline
         """
         # Open dialog to ask the user if they want to save the project
-        save_project = QtGui.QMessageBox.question(
-            self,
+        save_project = self.question_box(
             "Save Project",
             "Saving the project is required before submitting to Deadline. Do you want to save the project now?",
-            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
-            QtGui.QMessageBox.Yes,
         )
 
         # Return if the user selects No
-        if save_project == QtGui.QMessageBox.No:
+        if not save_project:
             return
 
         logger.debug("Applying settings and submitting to Deadline")
@@ -2542,8 +2633,19 @@ class AppDialog(QtGui.QWidget):
     ####################################
     # Deadline Dialogs
     ####################################
-    def show_machine_list_dialog(self):
+    def _exec_item_selection_dialog(self, title, items, target_widget):
+        """
+            Show an ItemSelectionDialog parented to the Toolkit window, then delete it.
+        """
+        dialog = ItemSelectionDialog(self.dialog_parent(), item_list=items, widget=target_widget)
+        dialog.setWindowTitle(title)
+        dialog.setWindowModality(QtCore.Qt.WindowModal)
+        try:
+            dialog.exec_()
+        finally:
+            dialog.deleteLater()
 
+    def show_machine_list_dialog(self):
         """
             Show the machine list dialog
         """
@@ -2554,12 +2656,7 @@ class AppDialog(QtGui.QWidget):
             self.alert_box("No machines found", "No machines found in the Deadline machine list")
             return
 
-        # Create the dialog
-        dialog = ItemSelectionDialog(self, item_list=machines, widget=self.ui.deadline_machine_list)
-        dialog.setWindowTitle("Select Machine List")
-
-        dialog.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Dialog)
-        dialog.exec_()
+        self._exec_item_selection_dialog("Select Machine List", machines, self.ui.deadline_machine_list)
 
     def show_limit_group_list_dialog(self):
         """
@@ -2572,54 +2669,146 @@ class AppDialog(QtGui.QWidget):
             self.alert_box("No limit groups found", "No limit groups found in the Deadline limit group list")
             return
 
-        # Create the dialog
-        dialog = ItemSelectionDialog(self, item_list=limit_groups, widget=self.ui.deadline_limits)
-        dialog.setWindowTitle("Select Limit Groups")
-
-        dialog.setWindowFlags(QtCore.Qt.WindowStaysOnTopHint | QtCore.Qt.Dialog)
-        dialog.exec_()
+        self._exec_item_selection_dialog("Select Limit Groups", limit_groups, self.ui.deadline_limits)
 
     ########################################
     # Threaded functions
     ########################################
+    def prepare_deadline_jobs(self):
+        """
+            Build everything needed to submit the included rows, on the GUI thread.
+
+            All After Effects (self.adobe) and widget access happens here, so the submission
+            worker only copies files, runs AfterFX.com and talks to Deadline over HTTP.
+
+            Returns:
+                tuple: (jobs, error_message). jobs is a list of plain dicts; rows that fail a
+                check are marked in the table and described in error_message.
+        """
+        jobs = []
+        error_message = ""
+
+        if not self.deadline_settings_initialized:
+            self.populate_deadline_settings()
+
+        if not self.run_project_checks():
+            return jobs, "Project checks failed"
+
+        if self.ui.compTableWidget.rowCount() == 0:
+            return jobs, "No render queue items available"
+
+        deadline_settings = self.get_deadline_settings()
+        if deadline_settings is None:
+            return jobs, "Could not read the Deadline settings"
+
+        app_version = self.adobe.app.version
+        version = '.'.join(app_version.split('x')[0].split('.')[:2])
+        project_path = self.adobe.app.project.file.fsName
+
+        for row in range(self.ui.compTableWidget.rowCount()):
+            tableItem = self.ui.compTableWidget.item(row, 0)
+            includeCheckBox = self.ui.compTableWidget.item(row, 6)
+            useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
+            if not tableItem or not includeCheckBox or includeCheckBox.checkState() != QtCore.Qt.Checked:
+                continue
+
+            compName = tableItem.text()
+            try:
+                render_queue_item = tableItem.data(QtCore.Qt.UserRole)
+                compName = render_queue_item.comp.name
+
+                # Item Status Check
+                if render_queue_item.status != self.adobe.RQItemStatus.QUEUED:
+                    raise ValueError(f"Skipped because comp '{compName}' is not in QUEUED status (status={render_queue_item.status}).")
+
+                # Item Spaces check
+                if compName.startswith(" ") or compName.endswith(" "):
+                    raise ValueError(f"Comp name '{compName}' has spaces at the front or back. Skipping.")
+
+                # Item Special Character check
+                if not re.match(r'^[a-zA-Z0-9_]+$', compName):
+                    raise ValueError(f"Comp name '{compName}' has special characters. Only letters, numbers, and underscores are allowed. Skipping.")
+
+                use_comp_name = useCompNameCheckBox.checkState() == QtCore.Qt.Checked
+                render_queue_template = self.get_render_queue_template(row)
+                render_scene_file_path = self.get_shotgrid_template(render_queue_template, use_comp_name, compName, True)
+
+                job_attrs, plugin_attrs = self.build_deadline_job_and_plugin_dicts(
+                    render_queue_item=render_queue_item,
+                    deadline_settings=deadline_settings,
+                    project_path=project_path,
+                    layers=False,
+                    previous_job_id="",
+                    version=version,
+                    render_file=render_scene_file_path
+                )
+
+                jobs.append({
+                    "row": row,
+                    "comp_name": compName,
+                    "project_path": project_path,
+                    "render_scene_file_path": render_scene_file_path,
+                    "manifest_job": self.build_manifest_job(
+                        render_queue_item, render_scene_file_path, project_manifest=True, comp_manifest=True),
+                    "job_attrs": job_attrs,
+                    "plugin_attrs": plugin_attrs,
+                })
+
+            except Exception as e:
+                logger.debug(traceback.format_exc())
+                msg = str(e) if isinstance(e, ValueError) else f"Failed to prepare comp '{compName}': {e}"
+                error_message += msg + "\n"
+                self.on_submission_item_update(row, msg, False)
+
+        return jobs, error_message
+
     def submit_to_deadline_threaded(self):
         """
             Submits the render queue items to Deadline using a separate thread to avoid blocking the UI
             and to provide progress updates through a DeadlineProgressDialog.
         """
+        if self.is_busy():
+            self.warning_box("Deadline Submission", "A submission is already running.")
+            return
 
-        comp_rows = []
-        comp_names = []
-        row_to_progress_idx = {}
+        self.toggle_buttons(False)
+        try:
+            jobs, self._submission_prep_errors = self.prepare_deadline_jobs()
+        except Exception as e:
+            logger.error(traceback.format_exc())
+            jobs, self._submission_prep_errors = [], f"Failed to prepare the submission: {e}"
 
-        for idx, row in enumerate(range(self.ui.compTableWidget.rowCount())):
-            item = self.ui.compTableWidget.item(row, 0)
-            includeCheckBox = self.ui.compTableWidget.item(row, 6)
-            if item and includeCheckBox and includeCheckBox.checkState() == QtCore.Qt.Checked:
-                comp_rows.append(row)
-                comp_names.append(item.text())
-                row_to_progress_idx[row] = len(comp_rows) - 1
-        self.deadline_progress_dialog = DeadlineProgressDialog(comp_names, logger=logger, parent=self)
+        if not jobs:
+            self.toggle_buttons(True)
+            self.message_box("Deadline Submission",
+                             f"Nothing was submitted.\n\n{self._submission_prep_errors}".strip())
+            return
+
+        self.show_progress_bar(format_text="Submitting to Deadline...")
+
+        self.deadline_progress_dialog = DeadlineProgressDialog(
+            [job["comp_name"] for job in jobs], logger=logger, parent=self.dialog_parent())
         self.deadline_progress_dialog.show()
 
-        # Create Thread For submissions
-        self.thread = QtCore.QThread()
-        self.worker = DeadlineSubmissionWorker(self, comp_rows, row_to_progress_idx)
-        self.worker.moveToThread(self.thread)
+        # Thread parented to this widget and kept on self (named _submit_thread so it doesn't
+        # shadow QObject.thread()). closeEvent refuses to close while it runs.
+        self._submit_thread = QtCore.QThread(self)
+        self._submit_worker = DeadlineSubmissionWorker(jobs, self.deadline_host, self.deadline_port, self.thread_log)
+        self._submit_worker.moveToThread(self._submit_thread)
 
-        # Connections
-        self.thread.started.connect(self.worker.run)
-        self.worker.progress.connect(self.on_submission_progress)
-        self.worker.finished.connect(self.on_submission_finished)
-        self.worker.finished.connect(self.thread.quit)
-        self.worker.finished.connect(self.worker.deleteLater)
-        self.thread.finished.connect(self.thread.deleteLater)
-        self.worker.item_update.connect(self.on_submission_item_update)
-        self.worker.row_progress.connect(self.deadline_progress_dialog.update_progress)
-        self.worker.row_done.connect(self.deadline_progress_dialog.mark_done)
+        # Connections. The worker lives in the other thread, so these are queued connections
+        # and every slot below runs on the GUI thread.
+        self._submit_thread.started.connect(self._submit_worker.run)
+        self._submit_worker.progress.connect(self.on_submission_progress)
+        self._submit_worker.item_update.connect(self.on_submission_item_update)
+        self._submit_worker.row_progress.connect(self.deadline_progress_dialog.update_progress)
+        self._submit_worker.row_done.connect(self.deadline_progress_dialog.mark_done)
+        self._submit_worker.finished.connect(self._submit_thread.quit)
+        self._submit_worker.finished.connect(self._submit_worker.deleteLater)
+        self._submit_worker.finished.connect(self.on_submission_finished)
 
         # Start Thread
-        self.thread.start()
+        self._submit_thread.start()
 
     def on_submission_item_update(self, row, message, success=True):
         """
@@ -2662,25 +2851,126 @@ class AppDialog(QtGui.QWidget):
                 error_message (str): The message to display.
                 num_successful_submissions (int): The number of successful submissions.
         """
-        if hasattr(self, "deadline_progress_dialog") and self.deadline_progress_dialog:
+        # Let the thread finish before anything can close the window.
+        if self._submit_thread is not None:
+            self._submit_thread.wait()
+            self._submit_thread.deleteLater()
+            self._submit_thread = None
+        self._submit_worker = None
+
+        if self.deadline_progress_dialog is not None:
             self.deadline_progress_dialog.close()
+            self.deadline_progress_dialog.deleteLater()
             self.deadline_progress_dialog = None
 
         self.hide_progress_bar()
         self.toggle_buttons(True)
 
+        error_message = (self._submission_prep_errors or "") + (error_message or "")
+        self._submission_prep_errors = ""
+
         if error_message:
-            self.message_box("Deadline Submission", f"Submission failed: {error_message}")
+            self.message_box(
+                "Deadline Submission",
+                f"{num_successful_submissions} job(s) submitted to Deadline.\n\nProblems:\n{error_message}")
         else:
             self.message_box("Deadline Submission",
                              f"Submission completed successfully.\n\n{num_successful_submissions} jobs submitted to Deadline.")
         self.activateWindow()
 
 
+class GuiThreadLogRelay(QtCore.QObject):
+    """
+        A logger for worker threads that hands every record to the GUI thread.
+
+        tk-aftereffects forwards each Toolkit log record to After Effects over the RPC
+        socket (engine._emit_log_message -> adobe.log_message). That socket is shared with
+        the GUI thread and is not thread safe, so logging straight from a worker thread can
+        corrupt the connection and take the Toolkit panel down. Create this on the GUI thread.
+    """
+    record = QtCore.Signal(int, str)
+
+    def __init__(self, target_logger, parent=None):
+        super(GuiThreadLogRelay, self).__init__(parent)
+        self._logger = target_logger
+        self.record.connect(self._on_record, QtCore.Qt.QueuedConnection)
+
+    @QtCore.Slot(int, str)
+    def _on_record(self, level, message):
+        self._logger.log(level, message)
+
+    def log(self, level, message, *args):
+        if args:
+            message = message % args
+        app = QtCore.QCoreApplication.instance()
+        if app is not None and QtCore.QThread.currentThread() == app.thread():
+            self._logger.log(level, message)
+        else:
+            self.record.emit(level, str(message))
+
+    def debug(self, message, *args):
+        self.log(logging.DEBUG, message, *args)
+
+    def info(self, message, *args):
+        self.log(logging.INFO, message, *args)
+
+    def warning(self, message, *args):
+        self.log(logging.WARNING, message, *args)
+
+    def error(self, message, *args):
+        self.log(logging.ERROR, message, *args)
+
+
+class _CallableWorker(QtCore.QObject):
+    """
+        Runs one callable in a worker thread (see AppDialog.run_blocking_in_thread).
+    """
+    finished = QtCore.Signal()
+
+    def __init__(self, func):
+        super(_CallableWorker, self).__init__()
+        self._func = func
+
+    @QtCore.Slot()
+    def run(self):
+        try:
+            self._func()
+        finally:
+            self.finished.emit()
+
+
+def submit_job_to_deadlineconnect(host, port, job_attrs, plugin_attrs, log=None):
+    """
+        Submit one job through DeadlineConnect (HTTP to the Web Service). Safe in any thread.
+
+        Returns:
+            str: The new job ID.
+
+        Raises:
+            Exception: If Deadline did not return a job.
+    """
+    import Deadline.DeadlineConnect as Connect
+
+    log = log or logger
+    deadline = Connect.DeadlineCon(host, port)
+    job = deadline.Jobs.SubmitJob(job_attrs, plugin_attrs)
+    log.info(f"Deadline submission results: {job}")
+
+    # If job is a dict and contains '_id', treat as success
+    if isinstance(job, dict) and '_id' in job:
+        log.info(f"Submitted Job ID: {job['_id']}")
+        return job['_id']
+
+    raise Exception(f"Deadline submission error: {job}")
+
+
 class DeadlineSubmissionWorker(QtCore.QObject):
     """
         Worker class for handling the Deadline submission process in a separate thread, allowing for progress updates
         and UI responsiveness.
+
+        It only gets plain data (from AppDialog.prepare_deadline_jobs) and never touches widgets
+        or engine.adobe: the After Effects RPC bridge and Qt widgets are not thread safe.
 
         Signals:
             progress (int, str): Emitted to update overall submission progress (percent, message).
@@ -2692,208 +2982,84 @@ class DeadlineSubmissionWorker(QtCore.QObject):
     progress = QtCore.Signal(int, str)  # percent, message
     finished = QtCore.Signal(str, int)  # error message, num_successful_submissions
     item_update = QtCore.Signal(int, str, bool)  # row, message, success
-    row_progress = QtCore.Signal(int, int, str)  # row, percent, message
-    row_done = QtCore.Signal(int, bool)  # row, success
+    row_progress = QtCore.Signal(int, int, str)  # progress index, percent, message
+    row_done = QtCore.Signal(int, bool)  # progress index, success
 
-    def __init__(self, parent_dialog, comp_rows, row_to_progress_idx):
-        super().__init__()
-        self.dialog = parent_dialog
-        self.comp_rows = comp_rows
-        self.row_to_progress_idx = row_to_progress_idx
+    def __init__(self, jobs, deadline_host, deadline_port, log):
+        super(DeadlineSubmissionWorker, self).__init__()
+        self.jobs = jobs
+        self.deadline_host = deadline_host
+        self.deadline_port = deadline_port
+        # Never the plain Toolkit logger here (see GuiThreadLogRelay)
+        self.log = log
 
     @QtCore.Slot()
     def run(self):
         """
-            Main function for the worker thread to handle the Deadline submission process,
-            iterating through the specified render queue items, performing necessary checks, generating manifests,
-            and submitting to Deadline while emitting progress updates  and handling errors appropriately.
+            Copy the render scene, generate the manifests and submit each prepared job.
         """
         error_message = ""
         num_successful_submissions = 0
 
         try:
+            total = max(1, len(self.jobs))
+            for idx, job in enumerate(self.jobs):
+                row = job["row"]
+                compName = job["comp_name"]
+                render_scene_file_path = job["render_scene_file_path"]
+                self.progress.emit(int(idx / total * 100), f"Submitting {compName} to Deadline...")
+                self.row_progress.emit(idx, 0, "Starting submission...")
 
-            dialog = self.dialog
-
-            if not dialog.deadline_settings_initialized:
-                dialog.populate_deadline_settings()
-
-            app_version = dialog.adobe.app.version
-            version = '.'.join(app_version.split('x')[0].split('.')[:2])
-            project_check = dialog.run_project_checks()
-
-            if not project_check:
-                self.finished.emit("Project checks failed", 0)
-                return
-
-            if dialog.ui.compTableWidget.rowCount() == 0:
-                self.finished.emit("No render queue items available", 0)
-                return
-
-            current_deadline_settings = dialog.get_deadline_settings()
-
-            deadline_error_message = ""
-            previous_job_id = ""
-            project_path = dialog.adobe.app.project.file.fsName
-            num_rows = dialog.ui.compTableWidget.rowCount()
-
-            for row in self.comp_rows:
-                progress_idx = self.row_to_progress_idx.get(row, None)
-                percent = int((row / max(1, num_rows)) * 100)
-                if progress_idx is not None:
-                    self.row_progress.emit(progress_idx, 0, "Starting submission...")
-
-                render_queue_item = dialog.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
-                includeCheckBox = dialog.ui.compTableWidget.item(row, 6)
-                statusItem = dialog.ui.compTableWidget.item(row, 1)
-                useCompNameCheckBox = dialog.ui.compTableWidget.item(row, 5)
-                compName = render_queue_item.comp.name
-                render_queue_template = dialog.get_render_queue_template(row)
-                use_comp_name = useCompNameCheckBox.checkState() == QtCore.Qt.Checked
-
-                # Checks
-
-                # Item Included Check
-                if includeCheckBox.checkState() != QtCore.Qt.Checked:
-                    msg = f"Skipped because 'Include' checkbox is not checked for comp '{compName}'."
-                    deadline_error_message += msg + "\n"
-                    self.item_update.emit(row, msg, False)
-                    if progress_idx is not None:
-                        self.row_done.emit(progress_idx, False)
-                    continue
-
-                # Item Status Check
-                if render_queue_item.status != dialog.adobe.RQItemStatus.QUEUED:
-                    msg = f"Skipped because comp '{compName}' is not in QUEUED status (status={render_queue_item.status})."
-                    deadline_error_message += msg + "\n"
-                    self.item_update.emit(row, msg, False)
-                    if progress_idx is not None:
-                        self.row_done.emit(progress_idx, False)
-                    continue
-
-                # Item Spaces check
-                if compName.startswith(" ") or compName.endswith(" "):
-                    msg = f"Comp name '{compName}' has spaces at the front or back. Skipping."
-                    deadline_error_message += msg + "\n"
-                    self.item_update.emit(row, msg, False)
-                    if progress_idx is not None:
-                        self.row_done.emit(progress_idx, False)
-                    continue
-
-                # Iterm Special Character check
-                if not re.match(r'^[a-zA-Z0-9_]+$', compName):
-                    msg = f"Comp name '{compName}' has special characters. Only letters, numbers, and underscores are allowed. Skipping."
-                    deadline_error_message += msg + "\n"
-                    self.item_update.emit(row, msg, False)
-                    if progress_idx is not None:
-                        self.row_done.emit(progress_idx, False)
-                    continue
-
-                # Output folder
-                render_scene_file_path = dialog.get_shotgrid_template(render_queue_template, use_comp_name, compName, True)
-                render_scene_file_directory = os.path.dirname(render_scene_file_path)
-
-                # Step 1: Copy project file
                 try:
-                    if progress_idx is not None:
-                        self.row_progress.emit(progress_idx, 10, f"Copying project file for {compName}...")
-                    if not os.path.exists(render_scene_file_directory):
-                        os.makedirs(render_scene_file_directory, exist_ok=True)
-                    shutil.copy(dialog.adobe.app.project.file.fsName, render_scene_file_path)
-
+                    # Step 1: Copy project file
+                    self.row_progress.emit(idx, 10, f"Copying project file for {compName}...")
+                    os.makedirs(os.path.dirname(render_scene_file_path), exist_ok=True)
+                    shutil.copy(job["project_path"], render_scene_file_path)
                 except Exception as e:
-                    msg = f"Failed to create render scene backup for comp '{compName}': {str(e)}"
-                    deadline_error_message += msg + "\n"
-                    self.item_update.emit(row, msg, False)
-                    if progress_idx is not None:
-                        self.row_done.emit(progress_idx, False)
+                    self.log.error(traceback.format_exc())
+                    self._fail(idx, row, f"Failed to create render scene backup for comp '{compName}': {e}")
+                    error_message += f"Failed to create render scene backup for comp '{compName}': {e}\n"
                     continue
 
-                # Step 2: Generate manifest
                 try:
-                    if progress_idx is not None:
-                        self.row_progress.emit(progress_idx, 30, f"Generating project manifest for {compName}...")
-                    dialog.generate_project_manifest_file_jsx(render_queue_item, render_scene_file_path)
-                    if progress_idx is not None:
-                        self.row_progress.emit(progress_idx, 50, f"Generating comp manifest for {compName}...")
-                    dialog.generate_manifest_file_for_queue_item_jsx(render_queue_item, render_scene_file_path)
-
+                    # Step 2: Generate manifests
+                    self.row_progress.emit(idx, 30, f"Generating manifests for {compName}...")
+                    AppDialog.run_manifest_job(job["manifest_job"], log=self.log)
                 except Exception as e:
-                    msg = f"Failed to generate manifest file for comp '{compName}': {str(e)}"
-                    deadline_error_message += msg + "\n"
-                    self.item_update.emit(row, msg, False)
-                    if progress_idx is not None:
-                        self.row_done.emit(progress_idx, False)
+                    self.log.error(traceback.format_exc())
+                    self._fail(idx, row, f"Failed to generate manifest file for comp '{compName}': {e}")
+                    error_message += f"Failed to generate manifest file for comp '{compName}': {e}\n"
                     continue
 
-                # Step 3: Submit to Deadline
                 try:
-                    self.progress.emit(percent, f"Submitting {compName} to Deadline...")
-
-                    job_attrs, plugin_attrs = dialog.build_deadline_job_and_plugin_dicts(
-                        render_queue_item=render_queue_item,
-                        deadline_settings=current_deadline_settings,
-                        project_path=project_path,
-                        layers=False,
-                        previous_job_id=previous_job_id,
-                        version=version,
-                        render_file=render_scene_file_path
-                    )
-                    dialog.submit_render_queue_item_to_deadlineconnect(job_attrs, plugin_attrs)
+                    # Step 3: Submit to Deadline
+                    self.row_progress.emit(idx, 70, f"Submitting {compName}...")
+                    job_id = submit_job_to_deadlineconnect(
+                        self.deadline_host, self.deadline_port, job["job_attrs"], job["plugin_attrs"], log=self.log)
                     num_successful_submissions += 1
-                    self.item_update.emit(row, f"Submitted comp '{compName}' to Deadline successfully.", True)
-                    if progress_idx is not None:
-                        self.row_done.emit(progress_idx, True)
-
+                    self.item_update.emit(row, f"Submitted comp '{compName}' to Deadline successfully ({job_id}).", True)
+                    self.row_done.emit(idx, True)
                 except Exception as e:
-                    msg = f"Failed to submit comp '{compName}' to Deadline: {str(e)}"
-                    deadline_error_message += msg + "\n"
-                    self.item_update.emit(row, msg, False)
-                    if progress_idx is not None:
-                        self.row_done.emit(progress_idx, False)
+                    self.log.error(traceback.format_exc())
+                    self._fail(idx, row, f"Failed to submit comp '{compName}' to Deadline: {e}")
+                    error_message += f"Failed to submit comp '{compName}' to Deadline: {e}\n"
                     continue
 
             # Final progress
             self.progress.emit(100, "Finished submitting to Deadline")
-            if deadline_error_message:
-                self.finished.emit(deadline_error_message, num_successful_submissions)
-            else:
-                self.finished.emit("", num_successful_submissions)
 
         except Exception as e:
-            self.finished.emit(str(e), num_successful_submissions)
+            self.log.error(traceback.format_exc())
+            error_message += str(e)
 
+        finally:
+            # Always emit, so the UI is unlocked and the thread is stopped.
+            self.finished.emit(error_message, num_successful_submissions)
 
-class LocalProjectManifestWorker(QtCore.QObject):
-    """
-        Worker for running project manifest generation outside the main UI thread.
-    """
-    finished = QtCore.Signal(str)
+    def _fail(self, idx, row, message):
+        self.item_update.emit(row, message, False)
+        self.row_done.emit(idx, False)
 
-    def __init__(self, dialog, render_queue_item, render_scene_file_path):
-        super().__init__()
-        self.dialog = dialog
-        self.render_queue_item = render_queue_item
-        self.render_scene_file_path = render_scene_file_path
-
-    @QtCore.Slot()
-    def run(self):
-        error_message = ""
-        try:
-            self.dialog.generate_project_manifest_file_jsx(self.render_queue_item, self.render_scene_file_path)
-        except Exception as e:
-            error_message = str(e)
-            logger.error("Failed generating project manifest on local worker: %s" % error_message)
-            logger.error(traceback.format_exc())
-
-        #try:
-        #    self.generate_manifest_file_for_queue_item_jsx(self.render_queue_item, self.render_scene_file_path)
-        #except Exception as e:
-        #    error_message += "\n" + str(e)
-        #    logger.error("Failed generating comp manifest on local worker: %s" % str(e))
-        #    logger.error(traceback.format_exc())
-
-        self.finished.emit(error_message)
 
 class DeadlineProgressDialog(QtGui.QDialog):
     """
@@ -2903,7 +3069,14 @@ class DeadlineProgressDialog(QtGui.QDialog):
         super().__init__(parent)
         self.logger = logger
         self.setWindowTitle("Deadline Submission Progress")
-        self.setModal(True)
+        # Window modal to its (Toolkit) parent rather than application modal, and no close
+        # button: it is closed by the app once the submission thread has finished.
+        self.setWindowModality(QtCore.Qt.WindowModal)
+        self.setWindowFlags(
+            (self.windowFlags() | QtCore.Qt.CustomizeWindowHint | QtCore.Qt.WindowTitleHint)
+            & ~QtCore.Qt.WindowCloseButtonHint
+            & ~QtCore.Qt.WindowContextHelpButtonHint
+        )
         self.resize(600, 60 + 30 * len(comp_names))
         self.layout = QtGui.QVBoxLayout(self)
         self.progress_bars = {}

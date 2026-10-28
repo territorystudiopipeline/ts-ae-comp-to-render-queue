@@ -305,17 +305,17 @@ class ItemSelectionDialog(QtGui.QDialog):
         self.setLayout(QtGui.QVBoxLayout())
 
         # List Layout
-        self.list_layout = QtGui.QHBoxLayout(self)
+        self.list_layout = QtGui.QHBoxLayout()
         self.list_layout.setObjectName("list_layout")
         self.list_layout.setContentsMargins(10, 10, 10, 10)
         self.list_layout.setSpacing(5)
 
         # selected List Layout
-        self.selected_list_layout = QtGui.QVBoxLayout(self)
+        self.selected_list_layout = QtGui.QVBoxLayout()
         self.selected_list_layout.setObjectName("selected_list_layout")
 
         # Available List Layout
-        self.available_list_layout = QtGui.QVBoxLayout(self)
+        self.available_list_layout = QtGui.QVBoxLayout()
         self.available_list_layout.setObjectName("available_list_layout")
 
         # Machine List
@@ -334,7 +334,7 @@ class ItemSelectionDialog(QtGui.QDialog):
         self.selected_list_layout.addWidget(self.selected_list)
 
         # Buttons
-        self.button_layout = QtGui.QVBoxLayout(self)
+        self.button_layout = QtGui.QVBoxLayout()
 
         self.add_button = QtGui.QPushButton(">", self)
         self.add_button.setToolTip("Add selected items to the selected list")
@@ -370,7 +370,7 @@ class ItemSelectionDialog(QtGui.QDialog):
         self.list_layout.addLayout(self.selected_list_layout)
 
         # Accept and Cancel Buttons
-        self.button_layout_2 = QtGui.QHBoxLayout(self)
+        self.button_layout_2 = QtGui.QHBoxLayout()
         self.button_layout_2.setObjectName("button_layout_2")
         self.accept_button = QtGui.QPushButton("Accept", self)
         self.cancel_button = QtGui.QPushButton("Cancel", self)
@@ -701,7 +701,9 @@ class Ui_Dialog(object):
         self.refreshAction = QtGui.QAction("Refresh", self.compTableWidget)
 
         # Context Menu
-        self.contextMenu = QtGui.QMenu()
+        # Parented to the table so the popup has an owner (an unparented QMenu is a
+        # free-floating top-level window nobody owns).
+        self.contextMenu = QtGui.QMenu(self.compTableWidget)
         self.contextMenu.setObjectName("contextMenu")
         self.contextMenu.addAction(self.matchSelectedCompsAction)
         self.contextMenu.addAction(self.removeSelectedCompsAction)

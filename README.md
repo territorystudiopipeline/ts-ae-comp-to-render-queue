@@ -1,3 +1,26 @@
+# ts-ae-comp-to-render-queue
+
+Adds the selected After Effects comps to the render queue, applies the studio output
+templates, and renders locally or submits to Deadline 10 (through DeadlineConnect).
+
+## Optional settings
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `afterfx_path` | empty | `AfterFX.com` used to run the manifest scripts. Empty finds it from the running After Effects version. |
+| `afterfx_timeout` | 0 | Seconds to wait for each After Effects script run (0 means the default, 300). |
+
+## Notes for developers
+
+- Anything that uses `engine.adobe` (the After Effects RPC bridge) or a Qt widget runs on the
+  GUI thread. Worker threads only copy files, run `AfterFX.com` and talk to Deadline, and they
+  log through `GuiThreadLogRelay` (tk-aftereffects sends every log record to AE over the RPC socket).
+- Every dialog is parented to the Toolkit window (`AppDialog.dialog_parent()`), never to `None`.
+- ExtendScript runs through `python/app/afterfx.py`: arguments reach the script as
+  `$.global.TS_JSX_ARGS`, and failures, timeouts and scripts that never ran raise `AfterFXError`.
+
+---
+
 [![Python 2.7 3.7](https://img.shields.io/badge/python-2.7%20%7C%203.7-blue.svg)](https://www.python.org/)
 [![Build Status](https://dev.azure.com/shotgun-ecosystem/Toolkit/_apis/build/status/Apps/tk-multi-starterapp?branchName=master)](https://dev.azure.com/shotgun-ecosystem/Toolkit/_build/latest?definitionId=57&branchName=master)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
