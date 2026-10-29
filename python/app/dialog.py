@@ -25,6 +25,7 @@ import traceback
 # the code will be compatible with both PySide and PyQt.
 from sgtk.platform.qt import QtCore, QtGui
 from .ui.dialog import Ui_Dialog, ItemSelectionDialog
+from .ui.theme import StatusTag, build_stylesheet
 from . import afterfx
 
 # standard toolkit logger
@@ -104,7 +105,6 @@ class AppDialog(QtGui.QWidget):
         self._busy_count = 0
         self._submit_thread = None
         self._submit_worker = None
-        self.deadline_progress_dialog = None
         self._submission_prep_errors = ""
         # Logger for worker threads; records are handed to the GUI thread (see GuiThreadLogRelay)
         self.thread_log = GuiThreadLogRelay(logger, parent=self)
@@ -123,13 +123,30 @@ class AppDialog(QtGui.QWidget):
         self._is_propagating_table_edit = False
         self._active_combo_selection_rows = []
 
+        # Look: ts_qt_utils stylesheet (if available), summary tags, Deadline summary
+        self._summary_tags = {}
+        self._qss = ""
+        self.apply_theme()
+        self.ui.sceneLabel.setText(self.get_scene_description())
+        self._deadline_summary = StatusTag(framed=True)
+        self.ui.deadlinePanel.add_header_widget(self._deadline_summary)
+        self.ui.compTableWidget.viewport().installEventFilter(self)
+
+        # Deadline pools/groups load in the background so opening the panel doesn't stall
+        self._deadline_fetch_thread = None
+        self._deadline_fetch_result = None
+
         self.connect_signals_and_slots()
 
         # Create render queue items
         self.create_render_queue_items()
 
-        # Set the window size
-        self.resize(1000, self.ui.compTableWidget.sizeHint().height())
+        # Window size and column widths from last time
+        self.resize(1180, 680)
+        self.restore_ui_state()
+
+        self.update_deadline_summary()
+        self.start_deadline_list_fetch()
 
     def populate_sg_fields(self):
         """
@@ -224,7 +241,8 @@ class AppDialog(QtGui.QWidget):
 
         # Check if there are any render queue items, if not no comps were selected before running the dialog
         if render_queue.numItems == 0:
-            self.alert_box("Add Comp To Render Queue", "Please select some comps to add to the render queue")
+            self.update_empty_state(
+                "The render queue is empty.\n\nSelect comps in the Project panel, then click Add Selected Comps.")
             return
 
         # Filter out the render queue items by status
@@ -241,13 +259,16 @@ class AppDialog(QtGui.QWidget):
 
         # Check if any render queue items are selected
         if len(filtered_render_queue_items) == 0:
-            self.alert_box("No Render Queue Items meet the criteria",
-                           "Please add some render queue items to apply the changes to")
+            self.update_empty_state(
+                "Nothing queued to render.\n\nThe render queue only has finished or stopped items: "
+                "use Clear Finished, then Add Selected Comps.")
             return
 
         # Add the comps to the table
         for item in filtered_render_queue_items:
             self.add_table_row(item)
+        self.update_empty_state()
+        self.refresh_summary()
 
     def add_table_row(self, item):
         """
@@ -271,26 +292,18 @@ class AppDialog(QtGui.QWidget):
         comp_name.setData(QtCore.Qt.UserRole, item) # Store the render queue item in the user data
         self.ui.compTableWidget.setItem(rowPosition, 0, comp_name)
 
-        # Add the status
-        status = "Unknown"
-        # Tooltip for the status
-        tooltip = "Unknown | Possible Error"
-        icon = self.ui.errorIcon
-
-        if item.status == self.adobe.RQItemStatus.QUEUED:
-            status = "Queued"
-            tooltip = "Template Applied | Ready to Render"
-            icon = self.ui.clearIcon
-
-        elif item.status == self.adobe.RQItemStatus.NEEDS_OUTPUT:
-            status = "Needs Output"
-            tooltip = "Template Not Applied | Needs Output"
-            icon = self.ui.warningIcon
-
-        statusItem = QtGui.QTableWidgetItem(icon, "")
-        statusItem.setToolTip(tooltip)
+        # Add the status: an empty item (keeps selection/hover working) under a StatusTag
+        statusItem = QtGui.QTableWidgetItem("")
         statusItem.setFlags(statusItem.flags() & ~QtCore.Qt.ItemIsEditable)
         self.ui.compTableWidget.setItem(rowPosition, 1, statusItem)
+        self.ui.compTableWidget.setCellWidget(rowPosition, 1, StatusTag())
+
+        if item.status == self.adobe.RQItemStatus.QUEUED:
+            self.set_row_status(rowPosition, "ready", "Template applied", "Template Applied | Ready to Render")
+        elif item.status == self.adobe.RQItemStatus.NEEDS_OUTPUT:
+            self.set_row_status(rowPosition, "needs_output", "Apply a template", "Template Not Applied | Needs Output")
+        else:
+            self.set_row_status(rowPosition, "error", "Unknown status", "Unknown | Possible Error")
 
         # Add Frame Range Input
         frameRangeLineEdit = QtGui.QLineEdit()
@@ -332,19 +345,19 @@ class AppDialog(QtGui.QWidget):
         # Connect the signals and slots
         frameRangeComboBox.currentIndexChanged.connect(lambda: self.refresh_frame_range(frameRangeComboBox, frameRangeLineEdit, item))
 
-        # Propagation signals
-        frameRangeComboBox.currentIndexChanged[str].connect(
+        # Propagation signals (currentTextChanged: same as currentIndexChanged[str], and exists in Qt6)
+        frameRangeComboBox.currentTextChanged.connect(
             lambda text, w=frameRangeComboBox, c=3: self._on_combo_changed_propagate(w, text, c)
         )
-        renderFormatDropdown.currentIndexChanged[str].connect(
+        renderFormatDropdown.currentTextChanged.connect(
             lambda text, w=renderFormatDropdown, c=4: self._on_combo_changed_propagate(w, text, c)
         )
         frameRangeLineEdit.textEdited.connect(
             lambda text, w=frameRangeLineEdit, c=2: self._on_line_edit_edited(w, text, c)
         )
 
-        # Trigger the signal to set the default frame range
-        frameRangeComboBox.emit(QtCore.SIGNAL("currentIndexChanged(int)"), 0)
+        # Set the default frame range (works on Qt5 and Qt6, unlike emitting by SIGNAL string)
+        self.refresh_frame_range(frameRangeComboBox, frameRangeLineEdit, item)
 
         # Include the render queue item checkbox
         includeCheckBox = QtGui.QTableWidgetItem()
@@ -392,7 +405,14 @@ class AppDialog(QtGui.QWidget):
         self.ui.refreshButton.clicked.connect(self.create_table_entries)
         self.ui.clearButton.clicked.connect(self.clear_render_queue_items)
         self.ui.cancelButton.clicked.connect(self.close)
-        self.ui.deadlinePanel.toggle_button.clicked.connect(self.populate_deadline_settings)
+        self.ui.deadlinePanel.toggle_button.clicked.connect(lambda: self.populate_deadline_settings(wait=False))
+
+        # Keep the collapsed Deadline summary current
+        for combo in (self.ui.deadline_pool, self.ui.deadline_group):
+            combo.currentTextChanged.connect(self.update_deadline_summary)
+        for line_edit in (self.ui.deadline_priority, self.ui.deadline_frames_per_task):
+            line_edit.textChanged.connect(self.update_deadline_summary)
+        self.ui.deadline_submit_as_suspended.toggled.connect(self.update_deadline_summary)
 
         # Connect the deadline settings
         #Machine List
@@ -582,7 +602,6 @@ class AppDialog(QtGui.QWidget):
             total_rows = self.ui.compTableWidget.rowCount()
             for row in range(total_rows):
                 tableItem = self.ui.compTableWidget.item(row, 0)
-                statusItem = self.ui.compTableWidget.item(row, 1)
                 frameRangeComboBox = self.ui.compTableWidget.cellWidget(row, 3)
                 renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
                 useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
@@ -593,19 +612,17 @@ class AppDialog(QtGui.QWidget):
                 self.show_progress_bar(format_text=f"Applying: {compName} ({row+1}/{total_rows})")
                 self.update_progress_bar(progress)
 
-                # Per-comp steps for secondary progress bar
+                # Per-comp steps, shown in the row's status cell
                 comp_steps = [
                     "Frame range check",
                     "Template check",
                     "Apply template",
                     "Set time span/output location"
                 ]
-                num_steps = len(comp_steps)
-                self.show_progress_bar(format_text=f"{compName}: {comp_steps[0]}", max=num_steps, primary=False)
-                self.update_progress_bar(0, primary=False)
                 step_idx = 0
 
                 if includeCheckBox.checkState() == QtCore.Qt.Checked:
+                    self.set_row_status(row, "busy", comp_steps[0], title="Applying")
                     try:
                         render_queue_item = tableItem.data(QtCore.Qt.UserRole)
                         comp = render_queue_item.comp
@@ -613,10 +630,8 @@ class AppDialog(QtGui.QWidget):
                         # Defensive type check for comp
                         if not hasattr(comp, 'name'):
                             logger.error(f"Row {row}: comp is not a valid comp object. Type: {type(comp)}, Value: {comp}")
-                            statusItem.setIcon(self.ui.errorIcon)
-                            statusItem.setToolTip("Template Not Applied | Error - Invalid comp object")
+                            self.set_row_status(row, "error", "Invalid comp", "Template Not Applied | Error - Invalid comp object")
                             includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                            self.hide_progress_bar(primary=False)
                             continue
 
                         compName = comp.name
@@ -625,20 +640,17 @@ class AppDialog(QtGui.QWidget):
                         frame_range = self.get_frame_range(comp, row)
 
                         # Step 1: Frame range check
-                        self.update_progress_bar_format(f"{compName}: {comp_steps[0]}", primary=False)
+                        self.set_row_status(row, "busy", comp_steps[0], title="Applying")
                         if frame_range[0] is None or frame_range[1] is None:
                             logger.debug("Bad frame range, skipping %s" % comp.name)
                             self.alert_box("Bad frame range", f"Please check the frame range for {comp.name}, Skipping")
-                            statusItem.setIcon(self.ui.errorIcon)
-                            statusItem.setToolTip("Template Not Applied | Error - Bad Frame Range")
+                            self.set_row_status(row, "error", "Bad frame range", "Template Not Applied | Error - Bad Frame Range")
                             includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                            self.hide_progress_bar(primary=False)
                             continue
                         step_idx += 1
-                        self.update_progress_bar(step_idx, primary=False)
 
                         # Step 2: Template check
-                        self.update_progress_bar_format(f"{compName}: {comp_steps[1]}", primary=False)
+                        self.set_row_status(row, "busy", comp_steps[1], title="Applying")
 
                         if not self.check_template_exists(render_queue_item, frame_range, render_queue_template, templateName):
 
@@ -646,17 +658,14 @@ class AppDialog(QtGui.QWidget):
 
                             logger.debug("Error applying template %s" % templateName)
                             logger.debug(render_queue_template)
-                            statusItem.setIcon(self.ui.errorIcon)
-                            statusItem.setToolTip("Template Not Applied | Error - Template Not Found")
+                            self.set_row_status(row, "error", "Template not found", "Template Not Applied | Error - Template Not Found")
                             includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                            self.hide_progress_bar(primary=False)
                             continue
 
                         step_idx += 1
-                        self.update_progress_bar(step_idx, primary=False)
 
                         # Step 3: Apply template
-                        self.update_progress_bar_format(f"{compName}: {comp_steps[2]}", primary=False)
+                        self.set_row_status(row, "busy", comp_steps[2], title="Applying")
                         try:
                             try:
                                 # Refetch item and comp to make sure its note a stale reference
@@ -667,19 +676,15 @@ class AppDialog(QtGui.QWidget):
 
                             except Exception as refetch_exc:
                                 logger.error("Failed to re-fetch render_queue_item: %s" % str(refetch_exc))
-                                statusItem.setIcon(self.ui.errorIcon)
-                                statusItem.setToolTip("Template Not Applied | Error - Could not re-fetch render_queue_item")
+                                self.set_row_status(row, "error", "Queue item missing", "Template Not Applied | Error - Could not re-fetch render_queue_item")
                                 includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                                self.hide_progress_bar(primary=False)
                                 continue
 
                             outputModuleAttr = getattr(render_queue_item, "outputModule", None)
                             if not callable(outputModuleAttr):
                                 logger.error("render_queue_item.outputModule is not callable after refresh! Type: %s, Value: %s" % (type(outputModuleAttr), outputModuleAttr))
-                                statusItem.setIcon(self.ui.errorIcon)
-                                statusItem.setToolTip("Template Not Applied | Error - outputModule not callable after refresh")
+                                self.set_row_status(row, "error", "Output module error", "Template Not Applied | Error - outputModule not callable after refresh")
                                 includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                                self.hide_progress_bar(primary=False)
                                 continue
 
                             if templateName in render_queue_item.outputModule(1).templates:
@@ -696,17 +701,14 @@ class AppDialog(QtGui.QWidget):
                             logger.debug("Error applying template %s" % templateName)
                             logger.debug("Exception: %s" % str(e))
                             logger.debug(traceback.format_exc())
-                            statusItem.setIcon(self.ui.errorIcon)
-                            statusItem.setToolTip("Template Not Applied | Error")
+                            self.set_row_status(row, "error", "Template error", "Template Not Applied | Error")
                             includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                            self.hide_progress_bar(primary=False)
                             continue
 
                         step_idx += 1
-                        self.update_progress_bar(step_idx, primary=False)
 
                         # Step 4: Time span and output location
-                        self.update_progress_bar_format(f"{compName}: {comp_steps[3]}", primary=False)
+                        self.set_row_status(row, "busy", comp_steps[3], title="Applying")
                         timespan = render_queue_item.getSetting("Time Span")
                         logger.debug("Time Span: %s" % timespan)
 
@@ -759,24 +761,17 @@ class AppDialog(QtGui.QWidget):
                                 outputLocation)
 
                         step_idx += 1
-                        self.update_progress_bar(step_idx, primary=False)
 
                         logger.debug("Render Queue Item for: %s has been updated" % render_queue_item.comp.name)
                         count += 1
-                        statusItem = self.ui.compTableWidget.item(row, 1)
-                        statusItem.setIcon(self.ui.clearIcon)
-                        statusItem.setToolTip("Template Applied | Ready to Render")
+                        self.set_row_status(row, "ready", "Template applied", "Template Applied | Ready to Render")
 
                     except Exception as item_exc:
                         logger.error(f"Exception while applying to row {row}: {item_exc}")
                         logger.error(traceback.format_exc())
-                        statusItem.setIcon(self.ui.errorIcon)
-                        statusItem.setToolTip("Template Not Applied | Error (row exception)")
+                        self.set_row_status(row, "error", "Apply failed", "Template Not Applied | Error (row exception)")
                         includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
-                        self.hide_progress_bar(primary=False)
                         continue
-
-                self.hide_progress_bar(primary=False)
 
             self.update_progress_bar(100)
             time.sleep(0.2)
@@ -955,7 +950,6 @@ class AppDialog(QtGui.QWidget):
 
         for row in range(num_items):
             tableItem = self.ui.compTableWidget.item(row, 0)
-            statusItem = self.ui.compTableWidget.item(row, 1)
             renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
             useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
@@ -1009,8 +1003,7 @@ class AppDialog(QtGui.QWidget):
                     self.deadline_error_message += "Failed to generate manifest file: %s\n" % compName
 
                     # Update the status icon
-                    statusItem.setIcon(self.ui.errorIcon)
-                    statusItem.setToolTip("Error - Failed to generate manifest file")
+                    self.set_row_status(row, "error", "Manifest failed", "Error - Failed to generate manifest file")
                     includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
 
                     continue
@@ -1034,8 +1027,7 @@ class AppDialog(QtGui.QWidget):
                     self.alert_box("Error", "Failed to create render scene backup:\n\n%s" % e)
 
                     # Update the status icon
-                    statusItem.setIcon(self.ui.errorIcon)
-                    statusItem.setToolTip("Local Render | Error - Failed to create render scene backup")
+                    self.set_row_status(row, "error", "Render scene copy failed", "Local Render | Error - Failed to create render scene backup")
                     includeCheckBox.setCheckState(QtCore.Qt.Unchecked)
                     continue
 
@@ -1046,9 +1038,7 @@ class AppDialog(QtGui.QWidget):
                 count += 1
 
                 # Update the status icon
-                statusItem = self.ui.compTableWidget.item(row, 1)
-                statusItem.setIcon(self.ui.clearIcon)
-                statusItem.setToolTip("Local Render | Ready to Render - Render Scene Created")
+                self.set_row_status(row, "rendering", "Render scene saved", "Local Render | Ready to Render - Render Scene Created")
 
             else:
                 # Change the render queue item status to UNQUEUED if unchecked
@@ -1056,13 +1046,12 @@ class AppDialog(QtGui.QWidget):
                 logger.debug("Render Queue Item for: %s has been set to UNQUEUED" % render_queue_item.comp.name)
 
                 # Update the status icon
-                statusItem = self.ui.compTableWidget.item(row, 1)
-                statusItem.setIcon(self.ui.warningIcon)
-
                 if render_queue_item.status == self.adobe.RQItemStatus.NEEDS_OUTPUT:
-                    statusItem.setToolTip("NEEDS OUTPUT - Template Not Applied | Needs Output")
+                    self.set_row_status(row, "needs_output", "Apply a template",
+                                        "NEEDS OUTPUT - Template Not Applied | Needs Output")
                 else:
-                    statusItem.setToolTip("UNQUEUED - Not Included in Render Queue")
+                    self.set_row_status(row, "warning", "Not included",
+                                        "UNQUEUED - Not Included in Render Queue")
 
         # Show progress at 100%
         self.update_progress_bar(100)
@@ -1256,7 +1245,13 @@ class AppDialog(QtGui.QWidget):
 
             returns: None
         """
+        if self.ui.compTableWidget.rowCount() == 0:
+            self.warning_box("Render", "There is nothing in the table to render.")
+            return
+
         try:
+            # Same as Submit: apply templates, frame ranges and output paths first
+            self.apply_to_render_queue_items()
             ready_to_render = self.process_queue_items_for_render()
         except Exception as e:
             logger.error(traceback.format_exc())
@@ -1306,6 +1301,181 @@ class AppDialog(QtGui.QWidget):
         return True
 
     ####################################################################################################
+    # Look: ts_qt_utils theme, status cells, summary tags, empty state, saved UI state
+    ####################################################################################################
+    UI_SETTINGS = ("Territory", "AERenderQueueUI")
+
+    # Order and labels of the summary tags in the header
+    SUMMARY_ORDER = (
+        ("ready", "Ready"),
+        ("needs_output", "Needs output"),
+        ("busy", "In progress"),
+        ("submitted", "Submitted"),
+        ("rendering", "Render ready"),
+        ("warning", "Skipped"),
+        ("error", "Error"),
+    )
+
+    def apply_theme(self):
+        """
+            Apply the ts_qt_utils dark theme (plus app overrides) to this window. Without
+            ts_qt_utils the Toolkit look is kept.
+        """
+        self._qss = build_stylesheet()
+        if self._qss:
+            # A QWidget subclass only paints a stylesheet background with WA_StyledBackground
+            self.setObjectName("renderQueueDialog")
+            self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
+            self.setStyleSheet(self._qss)
+
+    def style_popup(self, widget):
+        """
+            Give a dialog the same stylesheet. Needed for dialogs parented to the Toolkit window,
+            which don't inherit this widget's stylesheet.
+        """
+        if self._qss:
+            widget.setStyleSheet(self._qss)
+
+    def get_scene_description(self):
+        """
+            "<project file>  ·  <context>  ·  After Effects <version>" for the header.
+        """
+        parts = []
+        try:
+            project_file = self.adobe.app.project.file
+            parts.append(project_file.name if project_file else "Unsaved project")
+        except Exception:
+            pass
+        try:
+            parts.append(str(self._app.context))
+        except Exception:
+            pass
+        parts.append("After Effects %s" % str(self.ae_version).split("x")[0])
+        return "  ·  ".join(part for part in parts if part)
+
+    def set_row_status(self, row, status, message="", tooltip="", title=None):
+        """
+            Show a status in a row's Status cell.
+
+            Arguments:
+                row (int): Table row.
+                status (str): A key of ui.theme.STATUSES ("ready", "needs_output", "error",
+                    "warning", "busy", "submitted", "rendering").
+                message (str): Short text next to the status.
+                tooltip (str): Full detail on hover.
+                title (str): Overrides the status' default title (e.g. "Applying").
+        """
+        table = self.ui.compTableWidget
+        if row < 0 or row >= table.rowCount():
+            return
+        tag = table.cellWidget(row, 1)
+        if not isinstance(tag, StatusTag):
+            tag = StatusTag()
+            table.setCellWidget(row, 1, tag)
+        tag.set_status(status, message, tooltip, title=title)
+        self.refresh_summary()
+
+    def row_status(self, row):
+        """
+            The status key shown in a row, or None.
+        """
+        tag = self.ui.compTableWidget.cellWidget(row, 1)
+        return tag.status if isinstance(tag, StatusTag) else None
+
+    def refresh_summary(self):
+        """
+            Update the header tags with the number of rows in each status.
+        """
+        counts = {}
+        for row in range(self.ui.compTableWidget.rowCount()):
+            status = self.row_status(row)
+            counts[status] = counts.get(status, 0) + 1
+
+        layout = self.ui.summaryLayout
+        for key, label in self.SUMMARY_ORDER:
+            tag = self._summary_tags.get(key)
+            count = counts.get(key, 0)
+            if not count:
+                if tag is not None:
+                    tag.hide()
+                continue
+            if tag is None:
+                tag = StatusTag(framed=True)
+                self._summary_tags[key] = tag
+            # Re-add in order so the tags always read left to right in SUMMARY_ORDER
+            layout.removeWidget(tag)
+            layout.addWidget(tag)
+            tag.set_status(key, label, tooltip="%d comp(s): %s" % (count, label.lower()), title=str(count))
+            tag.show()
+
+    def update_empty_state(self, text=None):
+        """
+            Show the empty-state message over the table when it has no rows.
+        """
+        label = self.ui.emptyStateLabel
+        if text:
+            label.setText(text)
+        empty = self.ui.compTableWidget.rowCount() == 0
+        if empty:
+            label.resize(self.ui.compTableWidget.viewport().size())
+        label.setVisible(empty)
+        self.refresh_summary()
+
+    def update_deadline_summary(self, *args):
+        """
+            The one-line Deadline summary next to the collapsed panel's toggle.
+        """
+        if not hasattr(self, "_deadline_summary"):
+            return
+        if self.deadline_settings_initialized:
+            pool = self.ui.deadline_pool.currentText()
+            group = self.ui.deadline_group.currentText()
+            priority = self.ui.deadline_priority.text() or self.deadline_defaults.get("priority", "")
+            chunk = self.ui.deadline_frames_per_task.text() or self.deadline_defaults.get("frames_per_task", "")
+            suspended = self.ui.deadline_submit_as_suspended.isChecked()
+            loading = ""
+        else:
+            pool = self.ae_default_pool or "none"
+            group = self.deadline_defaults.get("group", "")
+            priority = self.deadline_defaults.get("priority", "")
+            chunk = self.deadline_defaults.get("frames_per_task", "")
+            suspended = False
+            loading = "  ·  loading pools…"
+
+        message = "Pool %s  ·  Group %s  ·  Priority %s  ·  %s frames/task%s%s" % (
+            pool or "none", group or "none", priority, chunk,
+            "  ·  Suspended" if suspended else "", loading)
+        self._deadline_summary.set_status(
+            "submitted", message, tooltip="Deadline settings used for Submit to Deadline", title="Farm")
+
+    def save_ui_state(self):
+        """
+            Remember window geometry and column widths between sessions.
+        """
+        try:
+            settings = QtCore.QSettings(*self.UI_SETTINGS)
+            settings.setValue("table_header", self.ui.compTableWidget.horizontalHeader().saveState())
+            settings.setValue("window_geometry", self.window().saveGeometry())
+        except Exception as e:
+            logger.debug("Could not save UI state: %s" % e)
+
+    def restore_ui_state(self):
+        """
+            Restore column widths now, and the window geometry once the Toolkit window exists.
+        """
+        try:
+            settings = QtCore.QSettings(*self.UI_SETTINGS)
+            header_state = settings.value("table_header")
+            if header_state:
+                self.ui.compTableWidget.horizontalHeader().restoreState(header_state)
+            geometry = settings.value("window_geometry")
+            if geometry:
+                # The Toolkit dialog wraps this widget after __init__, so wait for it
+                QtCore.QTimer.singleShot(0, lambda: self.window().restoreGeometry(geometry))
+        except Exception as e:
+            logger.debug("Could not restore UI state: %s" % e)
+
+    ####################################################################################################
     # Dialog parenting
     #
     # Every dialog/message box this app creates is parented to the Toolkit window that
@@ -1345,6 +1515,7 @@ class AppDialog(QtGui.QWidget):
             return QtGui.QMessageBox.NoButton
 
         box = QtGui.QMessageBox(icon, title, str(text), buttons, self.dialog_parent())
+        self.style_popup(box)
         box.setDefaultButton(default_button)
         box.setWindowModality(QtCore.Qt.WindowModal)
         try:
@@ -1413,7 +1584,12 @@ class AppDialog(QtGui.QWidget):
             submit_running = submit_thread is not None and submit_thread.isRunning()
         except RuntimeError:  # C++ object already deleted
             submit_running = False
-        return self._busy_count > 0 or submit_running
+        fetch_thread = getattr(self, "_deadline_fetch_thread", None)
+        try:
+            fetch_running = fetch_thread is not None and fetch_thread.isRunning()
+        except RuntimeError:
+            fetch_running = False
+        return self._busy_count > 0 or submit_running or fetch_running
 
     def closeEvent(self, event):
         """
@@ -1421,14 +1597,19 @@ class AppDialog(QtGui.QWidget):
             or the widgets its signals update, aborts the whole Python/Qt process.
             The Toolkit dialog wrapper honours an ignored close event.
         """
+        # Loading the Deadline lists only takes a moment: wait for it rather than refuse.
+        fetch_thread = getattr(self, "_deadline_fetch_thread", None)
+        if fetch_thread is not None and fetch_thread.isRunning():
+            fetch_thread.wait(3000)
         if self.is_busy():
             self.warning_box(
                 "Please wait",
-                "Still working (submitting to Deadline or generating manifests).\n"
+                "Still working (submitting to Deadline, generating manifests or loading Deadline pools).\n"
                 "Close the window once it has finished.",
             )
             event.ignore()
             return
+        self.save_ui_state()
         super(AppDialog, self).closeEvent(event)
 
     def get_shotgrid_template(self, render_queue_template, use_comp_name=False, comp_name=None, render_scene=False):
@@ -1826,6 +2007,8 @@ class AppDialog(QtGui.QWidget):
         Returns:
             bool: True if the event is handled, False otherwise.
         """
+        if obj is self.ui.compTableWidget.viewport() and event.type() == QtCore.QEvent.Resize:
+            self.ui.emptyStateLabel.resize(obj.size())
         if isinstance(obj, QtGui.QComboBox):
             if event.type() == QtCore.QEvent.MouseButtonPress:
                 # Snapshot selection before the combo interaction can change row selection.
@@ -1847,9 +2030,13 @@ class AppDialog(QtGui.QWidget):
                 int: The row under the mouse cursor
         """
 
-        pos = QtGui.QCursor.pos()
-        table_pos = self.ui.compTableWidget.viewport().mapFromGlobal(pos)
-        current_row = self.ui.compTableWidget.rowAt(table_pos.y())
+        # The row that was right-clicked (recorded when the menu opened). Reading the cursor
+        # now would give the row under the menu item, not the one clicked.
+        current_row = getattr(self.ui, "contextMenuRow", -1)
+        if current_row is None or current_row < 0:
+            pos = QtGui.QCursor.pos()
+            table_pos = self.ui.compTableWidget.viewport().mapFromGlobal(pos)
+            current_row = self.ui.compTableWidget.rowAt(table_pos.y())
 
         logger.debug("Returning Current Row: %s" % current_row)
         return current_row
@@ -1870,9 +2057,7 @@ class AppDialog(QtGui.QWidget):
 
     def remove_comp(self):
         """
-            Remove the comp from the render queue
-            offset by -1 because the table is 0 indexed and the render queue is 1 indexed.
-            This is still a bit of a hack, but it works for now and will be revised at in the future
+            Remove the right-clicked comp from the render queue and the table
 
         """
         row = self.get_row_from_cursor()
@@ -1880,15 +2065,18 @@ class AppDialog(QtGui.QWidget):
             logger.debug("Row is invalid")
             return
 
-        item = self.ui.compTableWidget.item(row-1, 0)  # Get the item in the first column of the row
+        item = self.ui.compTableWidget.item(row, 0)  # Get the item in the first column of the row
 
         if item:
-            render_queue_item = item.data(QtCore.Qt.UserRole)
+            render_queue_item = self.find_render_queue_item_for_row(row)
 
             # Remove the comp
-            logger.debug("Removing comp: %s" % render_queue_item.comp.name)
-            render_queue_item.remove()
-            self.ui.compTableWidget.removeRow(row-1)
+            if render_queue_item is not None:
+                logger.debug("Removing comp: %s" % render_queue_item.comp.name)
+                render_queue_item.remove()
+            self.ui.compTableWidget.removeRow(row)
+            self.update_empty_state()
+            self.refresh_summary()
 
     def remove_selected_comps(self):
         """
@@ -1903,15 +2091,16 @@ class AppDialog(QtGui.QWidget):
             return
 
         logger.debug("Removing selected comps: %s" % selected_rows)
-        # Remove the selected rows
-        for row in selected_rows:
-            item = self.ui.compTableWidget.item(row.row(), 0)
-            render_queue_item = item.data(QtCore.Qt.UserRole)
-
-            render_queue_item.remove()
-            self.ui.compTableWidget.removeRow(row.row())
+        # Remove from the bottom up so the remaining row numbers don't shift
+        for row in sorted((index.row() for index in selected_rows), reverse=True):
+            render_queue_item = self.find_render_queue_item_for_row(row)
+            if render_queue_item is not None:
+                render_queue_item.remove()
+            self.ui.compTableWidget.removeRow(row)
 
         logger.debug("Comps removed")
+        self.update_empty_state()
+        self.refresh_summary()
 
     def match_selected_to_current_row(self):
         """
@@ -1993,42 +2182,31 @@ class AppDialog(QtGui.QWidget):
     # Progress Bar
     #####################################################################################################
 
-    def show_progress_bar(self, format_text=None, max=100,primary=True):
+    def show_progress_bar(self, format_text=None, max=100, primary=True):
         """
-            Show the progress bar
+            Show the progress bar. Per-row steps go in the rows' status cells (set_row_status).
 
             Arguments:
                 format_text: The text to display on the progress bar
-                primary: Whether to show the primary progress bar or the secondary progress bar
-
-            Returns: None
+                primary: Kept for compatibility; there is only one bar now.
         """
-        if primary:
-            self.ui.progressBar.setVisible(True)
-            self.ui.progressBar.setMaximum(max)
-            self.ui.progressBar.setValue(0)
-            if format_text:
-                self.ui.progressBar.setFormat(f"{format_text} %p%")
-        else:
-            self.ui.secondaryProgressBar.setVisible(True)
-            self.ui.secondaryProgressBar.setMaximum(max)
-            self.ui.secondaryProgressBar.setValue(0)
-            if format_text:
-                self.ui.secondaryProgressBar.setFormat(f"{format_text} %p%")
+        if not primary:
+            return
+        self.ui.progressBar.setVisible(True)
+        self.ui.progressBar.setMaximum(max)
+        self.ui.progressBar.setValue(0)
+        if format_text:
+            self.ui.progressBar.setFormat(f"{format_text}  ·  %p%")
 
     def hide_progress_bar(self, primary=True):
         """
             Hide the progress bar
         """
-        if primary:
-            self.ui.progressBar.setVisible(False)
-            self.ui.progressBar.setValue(0)
-            self.ui.progressBar.setFormat("%p%")
-        else:
-            self.ui.secondaryProgressBar.setVisible(False)
-            self.ui.secondaryProgressBar.setValue(0)
-            self.ui.secondaryProgressBar.setFormat("%p%")
-
+        if not primary:
+            return
+        self.ui.progressBar.setVisible(False)
+        self.ui.progressBar.setValue(0)
+        self.ui.progressBar.setFormat("%p%")
 
     def update_progress_bar(self, value, primary=True):
         """
@@ -2038,8 +2216,6 @@ class AppDialog(QtGui.QWidget):
         """
         if primary:
             self.ui.progressBar.setValue(value)
-        else:
-            self.ui.secondaryProgressBar.setValue(value)
 
     def update_progress_bar_format(self, format_text, primary=True):
         """
@@ -2048,9 +2224,7 @@ class AppDialog(QtGui.QWidget):
                 format_text: The text to display on the progress bar
         """
         if primary:
-            self.ui.progressBar.setFormat(f"{format_text} %p%")
-        else:
-            self.ui.secondaryProgressBar.setFormat(f"{format_text} %p%")
+            self.ui.progressBar.setFormat(f"{format_text}  ·  %p%")
 
     ######################################################################################################
     # Deadline
@@ -2144,31 +2318,80 @@ class AppDialog(QtGui.QWidget):
             logger.error(error)
             return None
 
-    def populate_deadline_settings(self):
+    def populate_deadline_settings(self, wait=False):
         """
-            This Method populates the pool and group lists from Deadline and sets the default values.
-            It also sets the default values for the Deadline settings.
+            Fill the pool and group lists and apply the defaults and saved settings, once.
+
+            Uses the lists the background fetch loaded (start_deadline_list_fetch). If that is
+            still running: return and let it finish (wait=False, e.g. opening the panel), or wait
+            for it (wait=True, e.g. submitting). Without a fetch result, query Deadline now.
         """
-        if not self.deadline_settings_initialized:
-            logger.debug("Populating Deadline settings")
+        if self.deadline_settings_initialized:
+            return
 
-            # Get the pool and group lists from Deadline
-            pools = self.get_pool_list()
-            groups = self.get_group_list()
+        fetch_thread = self._deadline_fetch_thread
+        if fetch_thread is not None and fetch_thread.isRunning():
+            if not wait:
+                return
+            fetch_thread.wait()
 
-            # Populate the UI with the pools and groups
-            self.ui.deadline_pool.addItems(pools)
-            self.ui.deadline_secondary_pool.addItems(pools)
-            self.ui.deadline_group.addItems(groups)
-            self.ui.deadline_on_job_complete.addItems(self.deadline_defaults["on_job_complete"])
+        logger.debug("Populating Deadline settings")
+        result = self._deadline_fetch_result
+        if result is None:
+            result = {"pools": self.get_pool_list(), "groups": self.get_group_list()}
 
-            self.deadline_settings_initialized = True
-            logger.debug("Deadline settings populated")
+        # Populate the UI with the pools and groups
+        self.ui.deadline_pool.addItems(result["pools"])
+        self.ui.deadline_secondary_pool.addItems(result["pools"])
+        self.ui.deadline_group.addItems(result["groups"])
+        self.ui.deadline_on_job_complete.addItems(self.deadline_defaults["on_job_complete"])
 
-            self.set_deadline_defaults()
+        self.deadline_settings_initialized = True
+        logger.debug("Deadline settings populated")
 
-            settings = self.load_deadline_qsettings()
-            self.apply_deadline_qsettings_to_ui(settings)
+        self.set_deadline_defaults()
+
+        settings = self.load_deadline_qsettings()
+        self.apply_deadline_qsettings_to_ui(settings)
+        self.update_deadline_summary()
+
+    def start_deadline_list_fetch(self):
+        """
+            Load the Deadline pool and group lists in a worker thread (deadlinecommand can take
+            a few seconds), then fill the UI on the GUI thread.
+        """
+        if self.deadline_settings_initialized or self._deadline_fetch_thread is not None:
+            return
+
+        log = self.thread_log
+        holder = {}
+
+        def _fetch():
+            # Worker thread: subprocess only, no widgets, thread-safe logging
+            holder["pools"] = self.parse_non_empty_lines(self.call_deadline_command(["-Pools"], log=log))
+            holder["groups"] = self.parse_non_empty_lines(self.call_deadline_command(["-Groups"], log=log))
+
+        self._deadline_fetch_holder = holder
+        self._deadline_fetch_thread = QtCore.QThread(self)
+        self._deadline_fetch_worker = _CallableWorker(_fetch)
+        self._deadline_fetch_worker.moveToThread(self._deadline_fetch_thread)
+        self._deadline_fetch_thread.started.connect(self._deadline_fetch_worker.run)
+        self._deadline_fetch_worker.finished.connect(self._deadline_fetch_thread.quit)
+        self._deadline_fetch_worker.finished.connect(self._deadline_fetch_worker.deleteLater)
+        # Bound method of this widget: queued to the GUI thread
+        self._deadline_fetch_thread.finished.connect(self._on_deadline_lists_fetched)
+        self._deadline_fetch_thread.start()
+
+    def _on_deadline_lists_fetched(self):
+        holder = getattr(self, "_deadline_fetch_holder", {})
+        if "pools" in holder and "groups" in holder:
+            self._deadline_fetch_result = {"pools": holder["pools"], "groups": holder["groups"]}
+        if self._deadline_fetch_thread is not None:
+            self._deadline_fetch_thread.wait()
+            self._deadline_fetch_thread.deleteLater()
+            self._deadline_fetch_thread = None
+        self._deadline_fetch_worker = None
+        self.populate_deadline_settings()
 
     # Deadline Command Line Tool
     @staticmethod
@@ -2198,7 +2421,7 @@ class AppDialog(QtGui.QWidget):
 
     DEADLINE_COMMAND_TIMEOUT = 60
 
-    def call_deadline_command(self, arguments, hideWindow=True, readStdout=True):
+    def call_deadline_command(self, arguments, hideWindow=True, readStdout=True, log=None):
         """
         Calls the Deadline command with specified arguments.
 
@@ -2206,13 +2429,15 @@ class AppDialog(QtGui.QWidget):
             arguments (list): List of arguments to pass to the Deadline command.
             hideWindow (bool): Whether to hide the command window (Windows only).
             readStdout (bool): Whether to read the standard output.
+            log: Logger to use; pass AppDialog.thread_log from a worker thread.
 
         Returns:
             str: The standard output from the command if readStdout is True.
         """
+        log = log or logger
         deadlineCommand = self.get_deadline_command()
         if not deadlineCommand:
-            logger.error("Deadline command not found.")
+            log.error("Deadline command not found.")
             return ""
 
         startupinfo = None
@@ -2223,7 +2448,7 @@ class AppDialog(QtGui.QWidget):
             creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 
         try:
-            logger.debug("Calling Deadline command: %s %s" % (deadlineCommand, arguments))
+            log.debug("Calling Deadline command: %s %s" % (deadlineCommand, arguments))
             # Timeout so an unreachable repository can't freeze the UI (this runs on the GUI thread).
             result = subprocess.run(
                 [deadlineCommand] + arguments,
@@ -2234,13 +2459,13 @@ class AppDialog(QtGui.QWidget):
                 timeout=self.DEADLINE_COMMAND_TIMEOUT,
             )
             if result.returncode != 0:
-                logger.warning("deadlinecommand %s exited with %s: %s" % (arguments, result.returncode, result.stderr))
+                log.warning("deadlinecommand %s exited with %s: %s" % (arguments, result.returncode, result.stderr))
             if readStdout:
                 return result.stdout or ""
         except subprocess.TimeoutExpired:
-            logger.error("deadlinecommand %s timed out after %ss" % (arguments, self.DEADLINE_COMMAND_TIMEOUT))
+            log.error("deadlinecommand %s timed out after %ss" % (arguments, self.DEADLINE_COMMAND_TIMEOUT))
         except Exception as e:
-            logger.error(f"Failed to execute Deadline command: {e}")
+            log.error(f"Failed to execute Deadline command: {e}")
         # Callers parse the output, so never hand back None.
         return ""
 
@@ -2638,6 +2863,7 @@ class AppDialog(QtGui.QWidget):
             Show an ItemSelectionDialog parented to the Toolkit window, then delete it.
         """
         dialog = ItemSelectionDialog(self.dialog_parent(), item_list=items, widget=target_widget)
+        self.style_popup(dialog)
         dialog.setWindowTitle(title)
         dialog.setWindowModality(QtCore.Qt.WindowModal)
         try:
@@ -2689,7 +2915,7 @@ class AppDialog(QtGui.QWidget):
         error_message = ""
 
         if not self.deadline_settings_initialized:
-            self.populate_deadline_settings()
+            self.populate_deadline_settings(wait=True)
 
         if not self.run_project_checks():
             return jobs, "Project checks failed"
@@ -2758,14 +2984,15 @@ class AppDialog(QtGui.QWidget):
                 logger.debug(traceback.format_exc())
                 msg = str(e) if isinstance(e, ValueError) else f"Failed to prepare comp '{compName}': {e}"
                 error_message += msg + "\n"
-                self.on_submission_item_update(row, msg, False)
+                short = "Check failed" if isinstance(e, ValueError) else "Prepare failed"
+                self.on_submission_item_update(row, short, msg, False)
 
         return jobs, error_message
 
     def submit_to_deadline_threaded(self):
         """
             Submits the render queue items to Deadline using a separate thread to avoid blocking the UI
-            and to provide progress updates through a DeadlineProgressDialog.
+            and showing each row's progress in its status cell.
         """
         if self.is_busy():
             self.warning_box("Deadline Submission", "A submission is already running.")
@@ -2785,10 +3012,8 @@ class AppDialog(QtGui.QWidget):
             return
 
         self.show_progress_bar(format_text="Submitting to Deadline...")
-
-        self.deadline_progress_dialog = DeadlineProgressDialog(
-            [job["comp_name"] for job in jobs], logger=logger, parent=self.dialog_parent())
-        self.deadline_progress_dialog.show()
+        for job in jobs:
+            self.set_row_status(job["row"], "busy", "Queued for submit", title="Waiting")
 
         # Thread parented to this widget and kept on self (named _submit_thread so it doesn't
         # shadow QObject.thread()). closeEvent refuses to close while it runs.
@@ -2801,8 +3026,7 @@ class AppDialog(QtGui.QWidget):
         self._submit_thread.started.connect(self._submit_worker.run)
         self._submit_worker.progress.connect(self.on_submission_progress)
         self._submit_worker.item_update.connect(self.on_submission_item_update)
-        self._submit_worker.row_progress.connect(self.deadline_progress_dialog.update_progress)
-        self._submit_worker.row_done.connect(self.deadline_progress_dialog.mark_done)
+        self._submit_worker.row_progress.connect(self.on_submission_row_progress)
         self._submit_worker.finished.connect(self._submit_thread.quit)
         self._submit_worker.finished.connect(self._submit_worker.deleteLater)
         self._submit_worker.finished.connect(self.on_submission_finished)
@@ -2810,26 +3034,26 @@ class AppDialog(QtGui.QWidget):
         # Start Thread
         self._submit_thread.start()
 
-    def on_submission_item_update(self, row, message, success=True):
+    def on_submission_item_update(self, row, short_message, detail, success=True):
         """
-            Update the status icon and tooltip for a specific row in the comp table based on the submission result.
+            Show the submission result for a row.
 
             Arguments:
                 row (int): The row to update.
-                message (str): The message to display.
-                success (bool): Whether the row was successfully updated.
-
+                short_message (str): Short text shown in the status cell.
+                detail (str): Full detail for the tooltip.
+                success (bool): Whether the row was submitted.
         """
-        statusItem = self.ui.compTableWidget.item(row, 1)
-        if statusItem is None:
-            statusItem = QtGui.QTableWidgetItem("")
-            self.ui.compTableWidget.setItem(row, 1, statusItem)
         if success:
-            statusItem.setIcon(self.ui.submitIcon)
-            statusItem.setToolTip(message or "Submitted to Deadline")
+            self.set_row_status(row, "submitted", short_message, detail or "Submitted to Deadline")
         else:
-            statusItem.setIcon(self.ui.errorIcon)
-            statusItem.setToolTip(message or "Submission Failed")
+            self.set_row_status(row, "error", short_message, detail or "Submission Failed", title="Failed")
+
+    def on_submission_row_progress(self, row, message):
+        """
+            Show a submission step for a row (copying, manifests, submitting).
+        """
+        self.set_row_status(row, "busy", message)
 
     def on_submission_progress(self, percent, message):
         """
@@ -2857,11 +3081,6 @@ class AppDialog(QtGui.QWidget):
             self._submit_thread.deleteLater()
             self._submit_thread = None
         self._submit_worker = None
-
-        if self.deadline_progress_dialog is not None:
-            self.deadline_progress_dialog.close()
-            self.deadline_progress_dialog.deleteLater()
-            self.deadline_progress_dialog = None
 
         self.hide_progress_bar()
         self.toggle_buttons(True)
@@ -2975,15 +3194,13 @@ class DeadlineSubmissionWorker(QtCore.QObject):
         Signals:
             progress (int, str): Emitted to update overall submission progress (percent, message).
             finished (str, int): Emitted when submission is finished (error_message, num_successful_submissions).
-            item_update (int, str, bool): Emitted to update a specific row's status (row, message, success).
-            row_progress (int, int, str): Emitted to update a specific row's progress (row, percent, message).
-            row_done (int, bool): Emitted when a specific row's submission is done (row, success).
+            item_update (int, str, str, bool): A row's result (row, short message, detail, success).
+            row_progress (int, str): A row's current step (row, message).
     """
     progress = QtCore.Signal(int, str)  # percent, message
     finished = QtCore.Signal(str, int)  # error message, num_successful_submissions
-    item_update = QtCore.Signal(int, str, bool)  # row, message, success
-    row_progress = QtCore.Signal(int, int, str)  # progress index, percent, message
-    row_done = QtCore.Signal(int, bool)  # progress index, success
+    item_update = QtCore.Signal(int, str, str, bool)  # row, short message, detail, success
+    row_progress = QtCore.Signal(int, str)  # row, message
 
     def __init__(self, jobs, deadline_host, deadline_port, log):
         super(DeadlineSubmissionWorker, self).__init__()
@@ -3008,40 +3225,39 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                 compName = job["comp_name"]
                 render_scene_file_path = job["render_scene_file_path"]
                 self.progress.emit(int(idx / total * 100), f"Submitting {compName} to Deadline...")
-                self.row_progress.emit(idx, 0, "Starting submission...")
 
                 try:
                     # Step 1: Copy project file
-                    self.row_progress.emit(idx, 10, f"Copying project file for {compName}...")
+                    self.row_progress.emit(row, "Copying render scene…")
                     os.makedirs(os.path.dirname(render_scene_file_path), exist_ok=True)
                     shutil.copy(job["project_path"], render_scene_file_path)
                 except Exception as e:
                     self.log.error(traceback.format_exc())
-                    self._fail(idx, row, f"Failed to create render scene backup for comp '{compName}': {e}")
+                    self._fail(row, "Copy failed", f"Failed to create render scene backup for comp '{compName}': {e}")
                     error_message += f"Failed to create render scene backup for comp '{compName}': {e}\n"
                     continue
 
                 try:
                     # Step 2: Generate manifests
-                    self.row_progress.emit(idx, 30, f"Generating manifests for {compName}...")
+                    self.row_progress.emit(row, "Manifests in AE…")
                     AppDialog.run_manifest_job(job["manifest_job"], log=self.log)
                 except Exception as e:
                     self.log.error(traceback.format_exc())
-                    self._fail(idx, row, f"Failed to generate manifest file for comp '{compName}': {e}")
+                    self._fail(row, "Manifest failed", f"Failed to generate manifest file for comp '{compName}': {e}")
                     error_message += f"Failed to generate manifest file for comp '{compName}': {e}\n"
                     continue
 
                 try:
                     # Step 3: Submit to Deadline
-                    self.row_progress.emit(idx, 70, f"Submitting {compName}...")
+                    self.row_progress.emit(row, "Submitting…")
                     job_id = submit_job_to_deadlineconnect(
                         self.deadline_host, self.deadline_port, job["job_attrs"], job["plugin_attrs"], log=self.log)
                     num_successful_submissions += 1
-                    self.item_update.emit(row, f"Submitted comp '{compName}' to Deadline successfully ({job_id}).", True)
-                    self.row_done.emit(idx, True)
+                    self.item_update.emit(row, f"Job {str(job_id)[-8:]}",
+                                          f"Submitted comp '{compName}' to Deadline. Job ID: {job_id}", True)
                 except Exception as e:
                     self.log.error(traceback.format_exc())
-                    self._fail(idx, row, f"Failed to submit comp '{compName}' to Deadline: {e}")
+                    self._fail(row, "Deadline refused", f"Failed to submit comp '{compName}' to Deadline: {e}")
                     error_message += f"Failed to submit comp '{compName}' to Deadline: {e}\n"
                     continue
 
@@ -3056,84 +3272,5 @@ class DeadlineSubmissionWorker(QtCore.QObject):
             # Always emit, so the UI is unlocked and the thread is stopped.
             self.finished.emit(error_message, num_successful_submissions)
 
-    def _fail(self, idx, row, message):
-        self.item_update.emit(row, message, False)
-        self.row_done.emit(idx, False)
-
-
-class DeadlineProgressDialog(QtGui.QDialog):
-    """
-        Dialog class for displaying the progress of Deadline submissions, with individual progress bars for each comp being submitted.
-    """
-    def __init__(self, comp_names, logger, parent=None):
-        super().__init__(parent)
-        self.logger = logger
-        self.setWindowTitle("Deadline Submission Progress")
-        # Window modal to its (Toolkit) parent rather than application modal, and no close
-        # button: it is closed by the app once the submission thread has finished.
-        self.setWindowModality(QtCore.Qt.WindowModal)
-        self.setWindowFlags(
-            (self.windowFlags() | QtCore.Qt.CustomizeWindowHint | QtCore.Qt.WindowTitleHint)
-            & ~QtCore.Qt.WindowCloseButtonHint
-            & ~QtCore.Qt.WindowContextHelpButtonHint
-        )
-        self.resize(600, 60 + 30 * len(comp_names))
-        self.layout = QtGui.QVBoxLayout(self)
-        self.progress_bars = {}
-
-        for idx, name in enumerate(comp_names):
-            row_widget = QtGui.QWidget(self)
-            row_layout = QtGui.QHBoxLayout(row_widget)
-            label = QtGui.QLabel(name, row_widget)
-            progress = QtGui.QProgressBar(row_widget)
-            progress.setMinimum(0)
-            progress.setMaximum(100)
-            progress.setValue(0)
-            progress.setTextVisible(True)
-            progress.setFormat("%p%")
-            row_layout.addWidget(label)
-            row_layout.addWidget(progress)
-            self.layout.addWidget(row_widget)
-            self.progress_bars[idx] = progress
-
-    @QtCore.Slot(int, int, str)
-    def update_progress(self, row, percent, message=""):
-        """
-            Update the progress bar for a specific row with the given percentage and message.
-
-            Arguments:
-                row (int): The index of the row to update.
-                percent (int): The progress percentage to set (0-100).
-                message (str): An optional message to display alongside the percentage.
-
-        """
-        self.logger.debug(f"update_progress called: row={row}, percent={percent}, message={message}")
-        bar = self.progress_bars.get(row)
-        if bar:
-            bar.setValue(percent)
-            if message:
-                bar.setFormat(f"{message} %p%")
-            else:
-                bar.setFormat("%p%")
-        else:
-            self.logger.debug(f"No progress bar found for row {row}")
-
-    @QtCore.Slot(int, bool)
-    def mark_done(self, row, success=True):
-        """
-            Mark the progress for a specific row as done, setting the progress to 100% and updating the format based on success.
-
-            Arguments:
-                row (int): The index of the row to update.
-                success (bool): Whether the progress should be marked as done.
-        """
-        self.logger.debug(f"mark_done called: row={row}, success={success}")
-        bar = self.progress_bars.get(row)
-        if bar:
-            bar.setValue(100)
-            if success:
-                bar.setFormat("Done %p%")
-            else:
-                bar.setFormat("Error %p%")
-        else:
-            self.logger.debug(f"No progress bar found for row {row}")
+    def _fail(self, row, short_message, detail):
+        self.item_update.emit(row, short_message, detail, False)

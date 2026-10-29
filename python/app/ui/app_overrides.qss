@@ -1,0 +1,36 @@
+/* ts-ae-comp-to-render-queue overrides on top of the ts_qt_utils sheets (dollar-prefixed tokens resolve the same way). */
+
+/* Disabled states missing from ts_qt_utils inputs.qss */
+QComboBox:disabled                 { color: $TEXT_DIM; background: $BG; border-color: $BORDER; }
+QComboBox::down-arrow:disabled     { border-top-color: $TEXT_DIM; }
+QCheckBox::indicator:checked:disabled { background: $ACCENT_DIM; border-color: $ACCENT_MID; }
+
+/* Table: no section highlight, roomier rows */
+QTableView QLineEdit, QTableView QComboBox { margin: 0px; }
+
+/* Labels */
+QLabel#sceneLabel      { color: $TEXT_DIM; }
+QLabel#hintLabel       { color: $TEXT_DIM; font-size: $FS_SMALL; }
+QLabel#emptyStateLabel { color: $TEXT_DIM; font-size: $FS_TITLE; }
+
+/* Collapsible Deadline panel header */
+QPushButton#deadlinePanel_toggle_button { text-align: left; padding-left: 10px; min-width: 170px; }
+QFrame#deadlinePanel_content_frame      { border: none; background: transparent; }
+
+/* Small "..." picker buttons */
+QPushButton#button { padding: 0px; min-width: 22px; }
+
+/* Window background (custom QWidget subclasses need WA_StyledBackground, set in apply_theme) */
+QWidget#renderQueueDialog { background: $BG; }
+
+/* Include / Use Comp Name are item checkboxes: match the QCheckBox look */
+QTableView::indicator {
+    width: $CHECK_SZ; height: $CHECK_SZ;
+    border: 1.5px solid $BORDER_SOFT;
+    border-radius: 3px;
+    background: $INPUT_BG;
+}
+QTableView::indicator:hover     { border-color: $ACCENT; }
+QTableView::indicator:checked   { background: $ACCENT; border-color: $ACCENT; image: none; }
+QTableView::indicator:checked:disabled   { background: $ACCENT_DIM; border-color: $ACCENT_MID; }
+QTableView::indicator:unchecked:disabled { background: $BG; border-color: $BORDER; }

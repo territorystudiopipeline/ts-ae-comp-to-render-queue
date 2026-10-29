@@ -10,12 +10,25 @@ templates, and renders locally or submits to Deadline 10 (through DeadlineConnec
 | `afterfx_path` | empty | `AfterFX.com` used to run the manifest scripts. Empty finds it from the running After Effects version. |
 | `afterfx_timeout` | 0 | Seconds to wait for each After Effects script run (0 means the default, 300). |
 
+## Look (ts_qt_utils)
+
+The window uses the studio `ts_qt_utils` package: `StyleLoader` (dark theme) plus
+`python/app/ui/app_overrides.qss`, and `InfoTag` for the per-row status and the header summary.
+
+- `ts_qt_utils` (and its `QtPy` dependency) must be in the After Effects rez resolve
+  (`ts_aftereffects`), the same way `scene_fx_manager` is.
+- QtPy is pointed at Toolkit's Qt binding (`QT_API`). If ts_qt_utils is missing, or QtPy resolves
+  to a different binding than Toolkit (mixing bindings crashes Qt), the app logs a warning and
+  falls back to plain status labels and the default Toolkit look.
+
 ## Notes for developers
 
 - Anything that uses `engine.adobe` (the After Effects RPC bridge) or a Qt widget runs on the
   GUI thread. Worker threads only copy files, run `AfterFX.com` and talk to Deadline, and they
   log through `GuiThreadLogRelay` (tk-aftereffects sends every log record to AE over the RPC socket).
 - Every dialog is parented to the Toolkit window (`AppDialog.dialog_parent()`), never to `None`.
+- Row status goes through `AppDialog.set_row_status(row, status, message, tooltip)`; the header
+  summary and empty state update from it.
 - ExtendScript runs through `python/app/afterfx.py`: arguments reach the script as
   `$.global.TS_JSX_ARGS`, and failures, timeouts and scripts that never ran raise `AfterFXError`.
 
