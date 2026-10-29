@@ -1328,6 +1328,21 @@ class AppDialog(QtGui.QWidget):
             self.setAttribute(QtCore.Qt.WA_StyledBackground, True)
             self.setStyleSheet(self._qss)
 
+    def setStyleSheet(self, style_sheet):
+        """
+            Keep the theme when something else sets this widget's stylesheet.
+
+            Toolkit creates the widget, then applies the app's style.qss with
+            widget.setStyleSheet() (tk-core engine._apply_external_stylesheet, also on reload),
+            which would replace the theme set in __init__. The theme goes first and the given
+            sheet after it, so rules in style.qss still override the theme.
+        """
+        theme = getattr(self, "_qss", "")
+        style_sheet = style_sheet or ""
+        if theme and theme not in style_sheet:
+            style_sheet = theme + "\n\n/* ---- app style.qss ---- */\n" + style_sheet
+        super(AppDialog, self).setStyleSheet(style_sheet)
+
     def style_popup(self, widget):
         """
             Give a dialog the same stylesheet. Needed for dialogs parented to the Toolkit window,
