@@ -17,6 +17,115 @@ import sgtk
 logger = sgtk.platform.get_logger(__name__)
 
 
+def _enum_value(value):
+    """An int for a Qt enum value or plain int, on PySide2 and PySide6."""
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except TypeError:
+        return int(value.value)
+
+
+class CenteredCheckBoxDelegate(QtGui.QStyledItemDelegate):
+    """
+        Draws an item's check box in the centre of the cell and toggles it when the box is
+        clicked (or with Space). The item stays a normal checkable QTableWidgetItem, so
+        itemChanged, checkState() and the stylesheet's QTableView::indicator rules still apply.
+
+        Usage:
+            table.setItemDelegateForColumn(column, CenteredCheckBoxDelegate(table))
+    """
+
+    def _style(self, option):
+        widget = option.widget
+        return widget.style() if widget is not None else QtGui.QApplication.style()
+
+    def check_rect(self, option, index):
+        """
+            The rectangle of the check box, centred in the cell.
+        """
+        return self.box_rect(option.rect, option.widget, index)
+
+    def box_rect(self, cell_rect, widget, index):
+        """
+            The check box rectangle for a cell rectangle (usable without a style option).
+        """
+        opt = QtGui.QStyleOptionViewItem()
+        self.initStyleOption(opt, index)
+        opt.rect = cell_rect
+        opt.features |= QtGui.QStyleOptionViewItem.HasCheckIndicator
+        style = widget.style() if widget is not None else QtGui.QApplication.style()
+        indicator = style.subElementRect(QtGui.QStyle.SE_ItemViewItemCheckIndicator, opt, widget)
+        rect = QtCore.QRect(0, 0, indicator.width(), indicator.height())
+        rect.moveCenter(cell_rect.center())
+        return rect
+
+    @staticmethod
+    def toggle(model, index):
+        """
+            Flip an item's check state. Returns True if it changed.
+        """
+        flags = index.flags()
+        if not (flags & QtCore.Qt.ItemIsUserCheckable) or not (flags & QtCore.Qt.ItemIsEnabled):
+            return False
+        checked = _enum_value(index.data(QtCore.Qt.CheckStateRole)) == _enum_value(QtCore.Qt.Checked)
+        return model.setData(index, QtCore.Qt.Unchecked if checked else QtCore.Qt.Checked, QtCore.Qt.CheckStateRole)
+
+    def paint(self, painter, option, index):
+        style = self._style(option)
+
+        # Background, selection and hover, without the default (left-aligned) check box
+        background = QtGui.QStyleOptionViewItem(option)
+        self.initStyleOption(background, index)
+        background.features &= ~QtGui.QStyleOptionViewItem.HasCheckIndicator
+        background.text = ""
+        background.icon = QtGui.QIcon()
+        style.drawControl(QtGui.QStyle.CE_ItemViewItem, background, painter, option.widget)
+
+        if index.data(QtCore.Qt.CheckStateRole) is None:
+            return
+
+        check = QtGui.QStyleOptionViewItem(option)
+        self.initStyleOption(check, index)
+        check.rect = self.check_rect(option, index)
+        check.state &= ~(QtGui.QStyle.State_On | QtGui.QStyle.State_Off | QtGui.QStyle.State_NoChange)
+        state = _enum_value(index.data(QtCore.Qt.CheckStateRole))
+        if state == _enum_value(QtCore.Qt.Checked):
+            check.state |= QtGui.QStyle.State_On
+        elif state == _enum_value(QtCore.Qt.PartiallyChecked):
+            check.state |= QtGui.QStyle.State_NoChange
+        else:
+            check.state |= QtGui.QStyle.State_Off
+        style.drawPrimitive(QtGui.QStyle.PE_IndicatorItemViewItemCheck, check, painter, option.widget)
+
+    def editorEvent(self, event, model, option, index):
+        flags = index.flags()
+        if not (flags & QtCore.Qt.ItemIsUserCheckable) or not (flags & QtCore.Qt.ItemIsEnabled):
+            return False
+
+        event_type = event.type()
+        mouse_events = (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
+                        QtCore.QEvent.MouseButtonDblClick)
+        if event_type in mouse_events:
+            if event.button() != QtCore.Qt.LeftButton:
+                return False
+            position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            if not self.check_rect(option, index).contains(position):
+                return False
+            if event_type != QtCore.QEvent.MouseButtonRelease:
+                # Like Qt's own delegate: swallow press/double-click on the box, so clicking
+                # a box keeps the row selection (multi-row edits rely on it). Toggle on release.
+                return True
+        elif event_type == QtCore.QEvent.KeyPress:
+            if event.key() not in (QtCore.Qt.Key_Space, QtCore.Qt.Key_Select):
+                return False
+        else:
+            return False
+
+        return self.toggle(model, index)
+
+
 class DraggableTableWidget(QtGui.QTableWidget):
     def __init__(self, parent=None):
         super(DraggableTableWidget, self).__init__(parent)
@@ -32,8 +141,42 @@ class DraggableTableWidget(QtGui.QTableWidget):
             return
         super(DraggableTableWidget, self).keyPressEvent(event)
 
+    def _check_box_at(self, event):
+        """
+            The index whose centred check box is under the mouse, or None.
+        """
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        index = self.indexAt(position)
+        if not index.isValid():
+            return None
+        delegate = self.itemDelegateForColumn(index.column())
+        if not isinstance(delegate, CenteredCheckBoxDelegate):
+            return None
+        if delegate.box_rect(self.visualRect(index), self, index).contains(position):
+            return index
+        return None
+
+    def mousePressEvent(self, event):
+        # A click on a check box only toggles it: the row selection stays as it is, so the
+        # change can be applied to all selected rows.
+        if event.button() == QtCore.Qt.LeftButton and self._check_box_at(event) is not None:
+            event.accept()
+            return
+        super(DraggableTableWidget, self).mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        index = self._check_box_at(event) if event.button() == QtCore.Qt.LeftButton else None
+        if index is not None:
+            CenteredCheckBoxDelegate.toggle(self.model(), index)
+            event.accept()
+            return
+        super(DraggableTableWidget, self).mouseReleaseEvent(event)
+
     def mouseDoubleClickEvent(self, event):
-        idx = self.indexAt(event.pos())
+        if event.button() == QtCore.Qt.LeftButton and self._check_box_at(event) is not None:
+            event.accept()  # the second click's release toggles again, like a QCheckBox
+            return
+        idx = self.indexAt(event.position().toPoint() if hasattr(event, "position") else event.pos())
         if not idx.isValid():
             self.clearSelection()
             event.accept()
@@ -675,6 +818,11 @@ class Ui_Dialog(object):
         # Initial column widths (the user's widths are restored from QSettings)
         for column, width in ((1, 260), (2, 120), (3, 215), (4, 200), (5, 120), (6, 80)):
             self.compTableWidget.setColumnWidth(column, width)
+
+        # Use Comp Name / Include: check boxes centred in their cells
+        self.checkBoxDelegate = CenteredCheckBoxDelegate(self.compTableWidget)
+        for column in (5, 6):
+            self.compTableWidget.setItemDelegateForColumn(column, self.checkBoxDelegate)
 
         self.compTableWidget.verticalHeader().setVisible(False)
         self.compTableWidget.verticalHeader().setDefaultSectionSize(36)
