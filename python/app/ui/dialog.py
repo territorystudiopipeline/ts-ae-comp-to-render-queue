@@ -126,6 +126,34 @@ class CenteredCheckBoxDelegate(QtGui.QStyledItemDelegate):
         return self.toggle(model, index)
 
 
+class ElidedLabel(QtGui.QLabel):
+    """
+        A one-line label that shortens its text with "..." instead of claiming width, so
+        neighbouring widgets (the header summary tags) keep their space.
+    """
+
+    def __init__(self, text="", parent=None):
+        super(ElidedLabel, self).__init__(text, parent)
+        self._full_text = text
+        self.setSizePolicy(QtGui.QSizePolicy.Ignored, QtGui.QSizePolicy.Preferred)
+        self.setMinimumWidth(40)
+
+    def setText(self, text):
+        self._full_text = text or ""
+        self._update_elided()
+
+    def text(self):
+        return self._full_text
+
+    def resizeEvent(self, event):
+        super(ElidedLabel, self).resizeEvent(event)
+        self._update_elided()
+
+    def _update_elided(self):
+        elided = self.fontMetrics().elidedText(self._full_text, QtCore.Qt.ElideRight, max(0, self.width()))
+        super(ElidedLabel, self).setText(elided)
+
+
 class DraggableTableWidget(QtGui.QTableWidget):
     def __init__(self, parent=None):
         super(DraggableTableWidget, self).__init__(parent)
@@ -137,6 +165,23 @@ class DraggableTableWidget(QtGui.QTableWidget):
         # Locked while background work runs (see set_locked)
         self._locked = False
         self.viewport().installEventFilter(self)
+
+    def selectionCommand(self, index, event=None):
+        """
+            Don't let focus moving into a cell widget change the selection.
+
+            Qt treats cell widgets (the drop-downs and frame range fields) as persistent
+            editors: when one gets focus (a click, or just the mouse wheel over a drop-down) the
+            view makes its cell current, and with row selection that replaced the selection with
+            that one row. Focus-driven changes have no event; clicks and keys on the table
+            itself still select as normal.
+        """
+        if event is None:
+            focus_widget = QtGui.QApplication.focusWidget()
+            if (focus_widget is not None and focus_widget is not self
+                    and self.viewport().isAncestorOf(focus_widget)):
+                return QtCore.QItemSelectionModel.NoUpdate
+        return super(DraggableTableWidget, self).selectionCommand(index, event)
 
     # Cell widgets with this property stay enabled when the table is locked (e.g. status tags,
     # whose colours would otherwise be greyed out)
@@ -918,12 +963,12 @@ class Ui_Dialog(object):
         self.titleLayout.setSpacing(0)
         self.titleLabel = QtGui.QLabel("Render Queue")
         self.titleLabel.setProperty("heading", True)
-        self.sceneLabel = QtGui.QLabel("")
+        self.sceneLabel = ElidedLabel("")
         self.sceneLabel.setObjectName("sceneLabel")
         self.titleLayout.addWidget(self.titleLabel)
         self.titleLayout.addWidget(self.sceneLabel)
-        self.headerLayout.addLayout(self.titleLayout)
-        self.headerLayout.addStretch()
+        # The title block takes the spare width (its scene line elides); the tags keep theirs
+        self.headerLayout.addLayout(self.titleLayout, 1)
         # Summary tags are added here by the app (AppDialog.refresh_summary)
         self.summaryLayout = QtGui.QHBoxLayout()
         self.summaryLayout.setSpacing(6)
@@ -1464,6 +1509,13 @@ class Ui_Dialog(object):
 
         self.retranslateUi(Dialog)
         QtCore.QMetaObject.connectSlotsByName(Dialog)
+
+    def set_scene_text(self, text):
+        """
+            The scene line under the title (elided with "..." when the header is narrow).
+        """
+        self.sceneLabel.setText(text)
+        self.sceneLabel.setToolTip(text)
 
     def showContextMenu(self, pos):
         """

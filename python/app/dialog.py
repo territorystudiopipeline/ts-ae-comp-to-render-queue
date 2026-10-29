@@ -127,7 +127,8 @@ class AppDialog(QtGui.QWidget):
         self._summary_tags = {}
         self._qss = ""
         self.apply_theme()
-        self.ui.sceneLabel.setText(self.get_scene_description())
+        self.ui.set_scene_text(self.get_scene_description())
+        self.build_summary_tags()
         self._deadline_summary = StatusTag(framed=True)
         self.ui.deadlinePanel.add_header_widget(self._deadline_summary)
         self.ui.compTableWidget.viewport().installEventFilter(self)
@@ -311,6 +312,7 @@ class AppDialog(QtGui.QWidget):
 
         # Add the frame range ComboBox
         frameRangeComboBox = QtGui.QComboBox()
+        frameRangeComboBox.setFocusPolicy(QtCore.Qt.StrongFocus)  # no focus from the mouse wheel
         frameRangeComboBox.insertItems(0,[self.WORK_AREA_TEXT, self.COMP_TEXT, self.SINGLE_FRAME_TEXT, self.CUSTOM_TEXT])
         frameRangeComboBox.setToolTip("Select the frame range to render")
         frameRangeComboBox.installEventFilter(self)
@@ -318,6 +320,7 @@ class AppDialog(QtGui.QWidget):
 
         # Add the render format dropdown
         renderFormatDropdown = QtGui.QComboBox()
+        renderFormatDropdown.setFocusPolicy(QtCore.Qt.StrongFocus)  # no focus from the mouse wheel
         renderFormatDropdown.setToolTip("Select the render format template to use")
         renderFormatDropdown.installEventFilter(self)
 
@@ -1305,16 +1308,23 @@ class AppDialog(QtGui.QWidget):
     ####################################################################################################
     UI_SETTINGS = ("Territory", "AERenderQueueUI")
 
-    # Order and labels of the summary tags in the header
-    SUMMARY_ORDER = (
+    # Summary tags in the header, left to right. Core tags are always shown (greyed at zero) so
+    # nothing moves as counts change; the occasional ones sit on the left and only appear when
+    # they have rows, so they never push the core tags around.
+    SUMMARY_OCCASIONAL = (
+        ("rendering", "Render ready"),
+        ("warning", "Skipped"),
+    )
+    SUMMARY_CORE = (
         ("ready", "Ready"),
         ("needs_output", "Needs output"),
         ("busy", "In progress"),
         ("submitted", "Submitted"),
-        ("rendering", "Render ready"),
-        ("warning", "Skipped"),
         ("error", "Error"),
     )
+    SUMMARY_ORDER = SUMMARY_OCCASIONAL + SUMMARY_CORE
+    # Status changes can come in bursts (several per comp while applying); update at most this often
+    SUMMARY_REFRESH_MS = 80
 
     def apply_theme(self):
         """
@@ -1397,7 +1407,44 @@ class AppDialog(QtGui.QWidget):
         tag = self.ui.compTableWidget.cellWidget(row, 1)
         return tag.status if isinstance(tag, StatusTag) else None
 
+    def build_summary_tags(self):
+        """
+            Create the header summary tags once, in fixed slots with fixed widths.
+        """
+        self._summary_timer = QtCore.QTimer(self)
+        self._summary_timer.setSingleShot(True)
+        self._summary_timer.setInterval(self.SUMMARY_REFRESH_MS)
+        self._summary_timer.timeout.connect(self.update_summary_now)
+
+        core_keys = [key for key, _ in self.SUMMARY_CORE]
+        for key, label in self.SUMMARY_ORDER:
+            tag = StatusTag(framed=True)
+            self.ui.summaryLayout.addWidget(tag)
+            # Size for a two-digit count, then lock the width of the visible frame (the InfoTag,
+            # or the whole tag in the fallback) so changing numbers don't resize it and the
+            # gaps between tags stay even
+            tag.set_status(key, label, title="99")
+            frame = tag.frame_widget()
+            frame.ensurePolished()
+            frame.adjustSize()
+            frame.setFixedWidth(frame.sizeHint().width() + 2)
+            # ...and the slot around it, so a narrow window can't squeeze (clip) the frame
+            tag.setFixedWidth(tag.sizeHint().width())
+            tag.setVisible(key in core_keys)
+            self._summary_tags[key] = tag
+
     def refresh_summary(self):
+        """
+            Ask for a header summary update. Bursts of status changes are combined into one
+            update at most every SUMMARY_REFRESH_MS.
+        """
+        timer = getattr(self, "_summary_timer", None)
+        if timer is None:
+            return
+        if not timer.isActive():
+            timer.start()
+
+    def update_summary_now(self):
         """
             Update the header tags with the number of rows in each status.
         """
@@ -1406,22 +1453,18 @@ class AppDialog(QtGui.QWidget):
             status = self.row_status(row)
             counts[status] = counts.get(status, 0) + 1
 
-        layout = self.ui.summaryLayout
+        core_keys = [key for key, _ in self.SUMMARY_CORE]
         for key, label in self.SUMMARY_ORDER:
             tag = self._summary_tags.get(key)
-            count = counts.get(key, 0)
-            if not count:
-                if tag is not None:
-                    tag.hide()
-                continue
             if tag is None:
-                tag = StatusTag(framed=True)
-                self._summary_tags[key] = tag
-            # Re-add in order so the tags always read left to right in SUMMARY_ORDER
-            layout.removeWidget(tag)
-            layout.addWidget(tag)
-            tag.set_status(key, label, tooltip="%d comp(s): %s" % (count, label.lower()), title=str(count))
-            tag.show()
+                continue
+            count = counts.get(key, 0)
+            if key not in core_keys:
+                tag.setVisible(count > 0)
+            if count:
+                tag.set_status(key, label, tooltip="%d comp(s): %s" % (count, label.lower()), title=str(count))
+            else:
+                tag.set_status("idle", label, tooltip="No comps: %s" % label.lower(), title="0")
 
     def update_empty_state(self, text=None):
         """

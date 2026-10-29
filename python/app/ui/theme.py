@@ -83,6 +83,8 @@ STATUSES = {
     "busy": ("busy", "Working", "refresh_icon.png"),
     "submitted": ("submitted", "Submitted", "submit_icon.png"),
     "rendering": ("info", "Render ready", "clear_icon.png"),
+    # Greyed, e.g. a header summary tag with no rows
+    "idle": ("neutral", "", None),
 }
 
 # Extra InfoTag states this app uses (the built-in ones are critical/error/warning/info).
@@ -101,11 +103,18 @@ def _icon(file_name):
     return QtGui.QIcon(os.path.join(ICON_DIR, file_name))
 
 
+def _blank_icon(size=14):
+    """A transparent icon: keeps the icon's space so text doesn't shift (greyed/idle tags)."""
+    pixmap = QtGui.QPixmap(size, size)
+    pixmap.fill(QtCore.Qt.transparent)
+    return QtGui.QIcon(pixmap)
+
+
 def _app_state_icons():
     return {
         "submitted": _icon("submit_icon.png"),
         "busy": _icon("refresh_icon.png"),
-        "neutral": _icon("warning_icon.png"),
+        "neutral": _blank_icon(),
     }
 
 
@@ -178,6 +187,12 @@ class StatusTag(QtGui.QWidget):
         self.setProperty("keepEnabledWhenLocked", True)
         self.set_status(status, message, tooltip)
 
+    def frame_widget(self):
+        """
+            The widget drawing the tag's frame: the InfoTag, or this widget in the fallback.
+        """
+        return self._tag if self._tag is not None else self
+
     def set_status(self, status, message="", tooltip="", title=None):
         """
             Arguments:
@@ -199,6 +214,7 @@ class StatusTag(QtGui.QWidget):
                 self._tag.loading = state == "busy"
             self._tag.adjustSize()
         else:
-            self._icon_label.setPixmap(_icon(icon_file).pixmap(16, 16))
+            self._icon_label.setFixedSize(16, 16)
+            self._icon_label.setPixmap(_icon(icon_file).pixmap(16, 16) if icon_file else _blank_icon(16).pixmap(16, 16))
             self._text_label.setText("%s  %s" % (title, message) if message else title)
         self.setToolTip(tooltip or (("%s: %s" % (title, message)) if message else title))
