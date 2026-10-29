@@ -1778,8 +1778,9 @@ class AppDialog(QtGui.QWidget):
         self.ui.renderButton.setEnabled(state)
         self.ui.refreshButton.setEnabled(state)
         self.ui.clearButton.setEnabled(state)
-        # The table too: rows are addressed by index while work runs in the background.
-        self.ui.compTableWidget.setEnabled(state)
+        # Lock the table too: rows are addressed by index while work runs in the background.
+        # (Locked rather than disabled, so the status colours and spinners stay visible.)
+        self.ui.compTableWidget.set_locked(not state)
 
     #########################
     # Propagation Methods

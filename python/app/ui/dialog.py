@@ -134,7 +134,42 @@ class DraggableTableWidget(QtGui.QTableWidget):
         # Click / Ctrl+click / Shift+click, like every other table
         self.setSelectionMode(QtGui.QTableWidget.ExtendedSelection)
 
+        # Locked while background work runs (see set_locked)
+        self._locked = False
+        self.viewport().installEventFilter(self)
+
+    # Cell widgets with this property stay enabled when the table is locked (e.g. status tags,
+    # whose colours would otherwise be greyed out)
+    KEEP_ENABLED_PROPERTY = "keepEnabledWhenLocked"
+
+    def set_locked(self, locked):
+        """
+            Lock the table while work runs in the background: no clicks, keys, edits or context
+            menu, and the editable cell widgets are disabled. Unlike setEnabled(False), widgets
+            marked with KEEP_ENABLED_PROPERTY (status) keep their colours, and scrolling still works.
+        """
+        self._locked = bool(locked)
+        for row in range(self.rowCount()):
+            for column in range(self.columnCount()):
+                widget = self.cellWidget(row, column)
+                if widget is not None and not widget.property(self.KEEP_ENABLED_PROPERTY):
+                    widget.setEnabled(not self._locked)
+        self.viewport().update()
+
+    def is_locked(self):
+        return self._locked
+
+    def eventFilter(self, obj, event):
+        if self._locked and obj is self.viewport() and event.type() in (
+                QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
+                QtCore.QEvent.MouseButtonDblClick, QtCore.QEvent.ContextMenu):
+            return True
+        return super(DraggableTableWidget, self).eventFilter(obj, event)
+
     def keyPressEvent(self, event):
+        if self._locked:
+            event.ignore()
+            return
         if event.key() == QtCore.Qt.Key_Escape and self.selectionModel().hasSelection():
             self.clearSelection()
             event.accept()

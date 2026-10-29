@@ -71,6 +71,7 @@ def build_stylesheet(theme="dark"):
 _TOKENS = {
     "ELEVATED": "#323234", "ELEVATED2": "#3c3c3e", "BORDER_SOFT": "#48484a",
     "TEXT_SEC": "#a09d98", "TEXT_DIM": "#636360", "ACCENT_MID": "#7a5c2a", "ACCENT_LT": "#e0b85a",
+    "ACCENT": "#d4a84b", "BG": "#1c1c1e",
 }
 
 # key -> (InfoTag state, default title, fallback icon file)
@@ -87,7 +88,8 @@ STATUSES = {
 # Extra InfoTag states this app uses (the built-in ones are critical/error/warning/info).
 APP_STATE_STYLES = {
     "submitted": {"title_bg": "#0F5B7A", "title_fg": "#EAF8FF", "message_fg": _TOKENS["TEXT_SEC"]},
-    "busy": {"title_bg": _TOKENS["ACCENT_MID"], "title_fg": _TOKENS["ACCENT_LT"], "message_fg": _TOKENS["TEXT_SEC"]},
+    # Gold like the primary button; the loading spinner is tinted with this colour
+    "busy": {"title_bg": _TOKENS["ACCENT"], "title_fg": _TOKENS["BG"], "message_fg": _TOKENS["TEXT_SEC"]},
     "neutral": {"title_bg": _TOKENS["ELEVATED2"], "title_fg": _TOKENS["TEXT_SEC"], "message_fg": _TOKENS["TEXT_SEC"]},
 }
 # Message text for the built-in states: secondary text reads better inside a table.
@@ -172,6 +174,8 @@ class StatusTag(QtGui.QWidget):
             layout.addWidget(self._text_label)
         layout.addStretch()
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        # Keep status colours when the table is locked (DraggableTableWidget.set_locked)
+        self.setProperty("keepEnabledWhenLocked", True)
         self.set_status(status, message, tooltip)
 
     def set_status(self, status, message="", tooltip="", title=None):
@@ -189,6 +193,10 @@ class StatusTag(QtGui.QWidget):
             self._tag.state = state
             self._tag.title = title
             self._tag.message = message
+            # Rotating loading icon while in progress (ts_qt_utils releases with InfoTag.loading;
+            # older ones keep the static "busy" icon)
+            if hasattr(type(self._tag), "loading"):
+                self._tag.loading = state == "busy"
             self._tag.adjustSize()
         else:
             self._icon_label.setPixmap(_icon(icon_file).pixmap(16, 16))
