@@ -28,6 +28,7 @@ from .ui.dialog import Ui_Dialog, ItemSelectionDialog, ElidedLabel
 from .ui.theme import StatusTag, build_stylesheet
 from . import afterfx
 from . import render_monitor
+from . import deadline_monitor
 
 # standard toolkit logger
 logger = sgtk.platform.get_logger(__name__)
@@ -132,6 +133,16 @@ class AppDialog(QtGui.QWidget):
         self._row_key_counter = 0
         self._session_finished_indices = set()
         self._render_monitor = None
+        # Deadline jobs of submitted items (job ID in the item's comment, see deadline_monitor)
+        self._deadline_monitor = None
+        self._farm_jobs = {}             # job ID -> latest info from Deadline
+        self._farm_done_this_session = set()
+        self._submitted_jobs = []        # (row, job ID) from the running submission
+        self._pending_tags = {}          # job ID -> state to write into the item comment
+        self._tag_timer = QtCore.QTimer(self)
+        self._tag_timer.setSingleShot(True)
+        self._tag_timer.timeout.connect(self.flush_job_tags)
+        self._last_deadline_error = None
         self._hint_text = self.ui.hintLabel.text()
         self._hint_timer = QtCore.QTimer(self)
         self._hint_timer.setSingleShot(True)
@@ -247,6 +258,8 @@ class AppDialog(QtGui.QWidget):
     ROW_FINISHED_ROLE = QtCore.Qt.UserRole + 1   # FINISHED / FINISHED_THIS_SESSION (ints: Qt keeps
     ROW_FINISHED = 1                               # an item's first data type for a role, so a bool
     ROW_FINISHED_THIS_SESSION = 2                  # can't later become a string)
+    ROW_FARM = 3                                   # submitted, the Deadline job isn't complete yet
+    ROW_JOB_ROLE = QtCore.Qt.UserRole + 3          # Deadline job ID of a farm row
     ROW_KEY_ROLE = QtCore.Qt.UserRole + 2
 
     def create_table_entries(self):
@@ -265,7 +278,13 @@ class AppDialog(QtGui.QWidget):
             render_queue_item = render_queue.item(i)
             item_status = render_queue_item.status
             logger.debug("Render Queue Item %s status: %s" % (i, item_status))
-            if item_status in editable:
+            tag = None
+            if item_status == status.UNQUEUED:
+                # Unqueued after a Deadline submission: the comment holds the job
+                tag = deadline_monitor.read_tag(self._safe(lambda: render_queue_item.comment, ""))
+            if tag:
+                self.add_farm_row(render_queue_item, *tag)
+            elif item_status in editable:
                 self.add_table_row(render_queue_item)
             else:
                 self.add_finished_row(render_queue_item, item_status)
@@ -275,6 +294,7 @@ class AppDialog(QtGui.QWidget):
         self.apply_finished_filter()
         self.update_empty_state()
         self.refresh_summary()
+        self.sync_deadline_monitor()
 
         # Opened (or refreshed) while After Effects is rendering: follow that render too
         if num_items and self._render_monitor is None and render_queue.rendering:
@@ -485,7 +505,10 @@ class AppDialog(QtGui.QWidget):
             comp_item.setForeground(QtGui.QBrush(QtGui.QColor(self.FINISHED_TEXT_COLOUR)))
             # Frame range, frame range type and template become one output path cell
             for col in (2, 3, 4):
-                table.removeCellWidget(row, col)
+                old_widget = table.cellWidget(row, col)
+                table.removeCellWidget(row, col)  # deleted later, by the event loop
+                if old_widget is not None:
+                    old_widget.hide()  # gone now, even before that
             if table.columnSpan(row, 2) != 3:
                 table.setSpan(row, 2, 1, 3)
             label = ElidedLabel(outputs[0] if outputs else "")
@@ -534,7 +557,7 @@ class AppDialog(QtGui.QWidget):
         for row in range(table.rowCount()):
             item = table.item(row, 0)
             state = item.data(self.ROW_FINISHED_ROLE) if item is not None else None
-            if state:
+            if state in (self.ROW_FINISHED, self.ROW_FINISHED_THIS_SESSION):
                 finished += 1
             table.setRowHidden(row, state == self.ROW_FINISHED and not show)
         self.ui.showFinishedCheckBox.setText("Show finished (%d)" % finished if finished else "Show finished")
@@ -561,6 +584,7 @@ class AppDialog(QtGui.QWidget):
         self.ui.removeCompAction.setEnabled(valid)
         self.ui.openOutputFolderAction.setEnabled(valid)
         self.ui.requeueAction.setEnabled(finished)
+        self.ui.copyJobIdAction.setVisible(bool(valid and self.row_job_id(row)))
         selected_finished = [r for r in self._get_selected_rows() if self.is_row_finished(r)]
         count = len(selected_finished) if row in selected_finished else 1
         self.ui.requeueAction.setText("Re-queue %d Items" % count if finished and count > 1 else "Re-queue")
@@ -594,6 +618,17 @@ class AppDialog(QtGui.QWidget):
         with self.supress_dialogs():
             for r in rows:
                 render_queue_item = self.ui.compTableWidget.item(r, 0).data(QtCore.Qt.UserRole)
+                job_id = self.row_job_id(r)
+                if job_id:
+                    # Submitted item (unqueued, not Done in After Effects): queue it again as it is
+                    try:
+                        render_queue_item.comment = deadline_monitor.clear_tag(render_queue_item.comment)
+                        render_queue_item.render = True
+                        self._pending_tags.pop(job_id, None)
+                        count += 1
+                    except Exception as e:
+                        logger.error("Could not re-queue %s: %s" % (self.ui.compTableWidget.item(r, 0).text(), e))
+                    continue
                 try:
                     duplicate = render_queue_item.duplicate()
                     if duplicate.status == self.adobe.RQItemStatus.UNQUEUED:
@@ -707,6 +742,186 @@ class AppDialog(QtGui.QWidget):
         logger.info(text)
         self.show_hint(text, ms=30000)
 
+    ####################################################################################################
+    # Deadline jobs: farm rows (deadline_monitor)
+    #
+    # After a submission each item is unqueued and its comment gets "[Deadline <job id> <state>]".
+    # The table shows those items as read-only farm rows and follows their jobs while the window
+    # is open; when it's reopened the rows come back from the comments and catch up in one request.
+    ####################################################################################################
+    # Deadline state -> (status key, title)
+    FARM_STATUS = {
+        deadline_monitor.QUEUED: ("submitted", "Queued"),
+        deadline_monitor.RENDERING: ("busy", "On farm"),
+        deadline_monitor.SUSPENDED: ("stopped", "Suspended"),
+        deadline_monitor.COMPLETED: ("done", "Done"),
+        deadline_monitor.FAILED: ("failed", "Failed"),
+        deadline_monitor.NOT_FOUND: ("error", "Not found"),
+        deadline_monitor.UNKNOWN: ("submitted", "Farm"),
+    }
+
+    def row_job_id(self, row):
+        item = self.ui.compTableWidget.item(row, 0)
+        job_id = item.data(self.ROW_JOB_ROLE) if item is not None else None
+        return job_id or None
+
+    def rows_for_job(self, job_id):
+        table = self.ui.compTableWidget
+        return [row for row in range(table.rowCount()) if self.row_job_id(row) == job_id]
+
+    def add_farm_row(self, item, job_id, state):
+        """A read-only row for an item submitted to Deadline (state: last known, from the comment)."""
+        self.add_finished_row(item, self.adobe.RQItemStatus.UNQUEUED)
+        row = self.ui.compTableWidget.rowCount() - 1
+        info = self._farm_jobs.get(job_id) or {"state": state, "done": 0, "total": 0, "failed_tasks": 0,
+                                               "stale": state != deadline_monitor.COMPLETED}
+        self._set_farm_row(row, job_id, info["state"])
+        self.show_farm_status(row, job_id, info)
+
+    def _set_farm_row(self, row, job_id, state=None):
+        """Mark a farm row: followed while its job runs, finished (hideable) once it completed."""
+        comp_item = self.ui.compTableWidget.item(row, 0)
+        comp_item.setData(self.ROW_JOB_ROLE, job_id)
+        state = state or self._farm_jobs.get(job_id, {}).get("state")
+        done = state == deadline_monitor.COMPLETED
+        if not done:
+            comp_item.setData(self.ROW_FINISHED_ROLE, self.ROW_FARM)
+        elif job_id in self._farm_done_this_session:
+            comp_item.setData(self.ROW_FINISHED_ROLE, self.ROW_FINISHED_THIS_SESSION)
+        else:
+            comp_item.setData(self.ROW_FINISHED_ROLE, self.ROW_FINISHED)
+
+    def show_farm_status(self, row, job_id, info):
+        """Show a Deadline job's state in a farm row."""
+        state = info.get("state", deadline_monitor.UNKNOWN)
+        status, title = self.FARM_STATUS.get(state, self.FARM_STATUS[deadline_monitor.UNKNOWN])
+        done, total = info.get("done", 0), info.get("total", 0)
+        tasks = "%d/%d tasks" % (done, total) if total else ""
+        if info.get("stale"):
+            message = "Job %s  ·  checking…" % job_id[-8:]
+        elif state == deadline_monitor.QUEUED:
+            message = "Job %s" % job_id[-8:]
+        elif state == deadline_monitor.COMPLETED:
+            message = "Deadline  ·  %d tasks" % total if total else "Deadline"
+        elif state == deadline_monitor.FAILED:
+            message = "%d task%s failed" % (info.get("failed_tasks", 0), "" if info.get("failed_tasks") == 1 else "s") \
+                if info.get("failed_tasks") else tasks
+        elif state == deadline_monitor.NOT_FOUND:
+            message = "Job %s deleted?" % job_id[-8:]
+        else:
+            message = tasks
+            if info.get("failed_tasks"):
+                message += "  ·  %d failed" % info["failed_tasks"]
+        label = self.ui.compTableWidget.cellWidget(row, 2)
+        output = label.toolTip() if label is not None else ""
+        tooltip = "Deadline job %s%s\n%s%s" % (
+            job_id, (" (%s)" % info["name"]) if info.get("name") else "",
+            "Last known state, checking Deadline…" if info.get("stale") else "%s  %s" % (title, message),
+            ("\n" + output) if output else "")
+        self.set_row_status(row, status, message, tooltip, title=title)
+
+    def on_job_submitted(self, row, job_id):
+        """A row's job was accepted by Deadline (linked once the submission ends)."""
+        self._submitted_jobs.append((row, job_id))
+
+    def link_submitted_jobs(self):
+        """
+            After a submission: tag each submitted item's comment with its job, unqueue it (so
+            Render Locally / Submit don't send it again) and turn its row into a farm row.
+            No extra save: the change is stored at the next save (After Effects asks before
+            closing a modified project).
+        """
+        submitted, self._submitted_jobs = self._submitted_jobs, []
+        for row, job_id in submitted:
+            comp_item = self.ui.compTableWidget.item(row, 0)
+            render_queue_item = comp_item.data(QtCore.Qt.UserRole) if comp_item else None
+            if render_queue_item is None:
+                continue
+            try:
+                render_queue_item.comment = deadline_monitor.write_tag(
+                    render_queue_item.comment, job_id, deadline_monitor.QUEUED)
+                render_queue_item.render = False
+            except Exception as e:
+                logger.error("Could not link %s to Deadline job %s: %s" % (comp_item.text(), job_id, e))
+                continue
+            self._make_row_read_only(row, self.output_paths(render_queue_item))
+            self._set_farm_row(row, job_id)
+            self._farm_jobs.setdefault(job_id, {"state": deadline_monitor.QUEUED, "done": 0, "total": 0,
+                                                "failed_tasks": 0})
+            self.show_farm_status(row, job_id, self._farm_jobs[job_id])
+        if submitted:
+            self.apply_finished_filter()
+            self.sync_deadline_monitor()
+
+    def deadline_job_monitor(self):
+        if self._deadline_monitor is None:
+            self._deadline_monitor = deadline_monitor.DeadlineJobMonitor(
+                self.deadline_host, self.deadline_port, parent=self)
+            self._deadline_monitor.job_updated.connect(self.on_deadline_job_updated)
+            self._deadline_monitor.error.connect(self.on_deadline_monitor_error)
+        return self._deadline_monitor
+
+    def sync_deadline_monitor(self):
+        """Follow the jobs of the farm rows that aren't complete."""
+        job_ids = set()
+        for row in range(self.ui.compTableWidget.rowCount()):
+            job_id = self.row_job_id(row)
+            if job_id and self.ui.compTableWidget.item(row, 0).data(self.ROW_FINISHED_ROLE) == self.ROW_FARM:
+                job_ids.add(job_id)
+        if job_ids or self._deadline_monitor is not None:
+            self.deadline_job_monitor().set_jobs(job_ids)
+
+    def on_deadline_job_updated(self, job_id, info):
+        previous = self._farm_jobs.get(job_id, {}).get("state")
+        self._farm_jobs[job_id] = info
+        self._last_deadline_error = None
+        completed = info["state"] == deadline_monitor.COMPLETED
+        if completed and previous != deadline_monitor.COMPLETED:
+            self._farm_done_this_session.add(job_id)
+        for row in self.rows_for_job(job_id):
+            self._set_farm_row(row, job_id)
+            self.show_farm_status(row, job_id, info)
+        if completed:
+            self.apply_finished_filter()
+        # Keep the comment's state current (written when the state changes, not for progress)
+        self._pending_tags[job_id] = info["state"]
+        if not self._tag_timer.isActive():
+            self._tag_timer.start(500)
+
+    def on_deadline_monitor_error(self, error):
+        if error != self._last_deadline_error:
+            self._last_deadline_error = error
+            self.show_hint("Can't reach Deadline (%s); showing the last known state" % error, ms=20000)
+
+    def flush_job_tags(self, force=False):
+        """
+            Write changed job states into the item comments. Waits while other After Effects
+            work runs (the table is locked then), so it never interleaves with it.
+        """
+        if not self._pending_tags:
+            return
+        if not force and self.ui.compTableWidget.is_locked():
+            self._tag_timer.start(1000)
+            return
+        pending, self._pending_tags = self._pending_tags, {}
+        for job_id, state in pending.items():
+            for row in self.rows_for_job(job_id):
+                render_queue_item = self.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole)
+                try:
+                    comment = render_queue_item.comment
+                    tag = deadline_monitor.read_tag(comment)
+                    if tag and tag[0] == job_id and tag[1] != state:
+                        render_queue_item.comment = deadline_monitor.write_tag(comment, job_id, state)
+                except Exception as e:
+                    logger.debug("Could not update the Deadline tag of job %s: %s" % (job_id, e))
+
+    def copy_job_id(self):
+        row = self.get_row_from_cursor()
+        job_id = self.row_job_id(row) if row >= 0 else None
+        if job_id:
+            QtGui.QApplication.clipboard().setText(job_id)
+            self.show_hint("Copied job ID %s" % job_id)
+
     def populate_presets(self, widget=None):
         """
             Populate the render format dropdown with the available
@@ -773,6 +988,7 @@ class AppDialog(QtGui.QWidget):
         self.ui.refreshAction.triggered.connect(self.create_table_entries)
         self.ui.openOutputFolderAction.triggered.connect(self.open_output_folder)
         self.ui.requeueAction.triggered.connect(self.requeue_finished_rows)
+        self.ui.copyJobIdAction.triggered.connect(self.copy_job_id)
         self.ui.contextMenu.aboutToShow.connect(self.update_context_menu)
         self.ui.showFinishedCheckBox.toggled.connect(self.apply_finished_filter)
 
@@ -1441,7 +1657,15 @@ class AppDialog(QtGui.QWidget):
 
             for i in range(renderQueue.numItems, 0, -1):
                 item = renderQueue.item(i)
-                if item.status == self.adobe.RQItemStatus.DONE or item.status == self.adobe.RQItemStatus.USER_STOPPED:
+                item_status = item.status
+                remove = item_status in (self.adobe.RQItemStatus.DONE, self.adobe.RQItemStatus.USER_STOPPED)
+                if not remove and item_status == self.adobe.RQItemStatus.UNQUEUED:
+                    # Submitted to Deadline and the job has completed
+                    tag = deadline_monitor.read_tag(self._safe(lambda: item.comment, ""))
+                    if tag:
+                        state = self._farm_jobs.get(tag[0], {}).get("state", tag[1])
+                        remove = state == deadline_monitor.COMPLETED
+                if remove:
                     logger.debug("Removing render queue item: %s" % item.comp.name)
                     item.remove()
                     count += 1
@@ -2046,6 +2270,11 @@ class AppDialog(QtGui.QWidget):
             )
             event.ignore()
             return
+        # Deadline jobs: write any pending comment tags, stop asking Deadline
+        self.flush_job_tags(force=True)
+        if self._deadline_monitor is not None:
+            self._deadline_monitor.stop()
+            self._deadline_monitor = None
         # A local render carries on in After Effects; just stop following it
         if self._render_monitor is not None:
             self._render_monitor.stop()
@@ -2830,7 +3059,9 @@ class AppDialog(QtGui.QWidget):
         self._deadline_fetch_worker = _CallableWorker(_fetch)
         self._deadline_fetch_worker.moveToThread(self._deadline_fetch_thread)
         self._deadline_fetch_thread.started.connect(self._deadline_fetch_worker.run)
-        self._deadline_fetch_worker.finished.connect(self._deadline_fetch_thread.quit)
+        # Direct: QThread.quit is thread-safe, and a queued quit would never arrive while
+        # closeEvent blocks the GUI thread in wait()
+        self._deadline_fetch_worker.finished.connect(self._deadline_fetch_thread.quit, QtCore.Qt.DirectConnection)
         self._deadline_fetch_worker.finished.connect(self._deadline_fetch_worker.deleteLater)
         # Bound method of this widget: queued to the GUI thread
         self._deadline_fetch_thread.finished.connect(self._on_deadline_lists_fetched)
@@ -3482,6 +3713,8 @@ class AppDialog(QtGui.QWidget):
         self._submit_thread.started.connect(self._submit_worker.run)
         self._submit_worker.progress.connect(self.on_submission_progress)
         self._submit_worker.item_update.connect(self.on_submission_item_update)
+        self._submit_worker.job_submitted.connect(self.on_job_submitted)
+        self._submitted_jobs = []
         self._submit_worker.row_progress.connect(self.on_submission_row_progress)
         self._submit_worker.finished.connect(self._submit_thread.quit)
         self._submit_worker.finished.connect(self._submit_worker.deleteLater)
@@ -3540,6 +3773,7 @@ class AppDialog(QtGui.QWidget):
 
         self.hide_progress_bar()
         self.toggle_buttons(True)
+        self.link_submitted_jobs()
 
         error_message = (self._submission_prep_errors or "") + (error_message or "")
         self._submission_prep_errors = ""
@@ -3657,6 +3891,7 @@ class DeadlineSubmissionWorker(QtCore.QObject):
     finished = QtCore.Signal(str, int)  # error message, num_successful_submissions
     item_update = QtCore.Signal(int, str, str, bool)  # row, short message, detail, success
     row_progress = QtCore.Signal(int, str)  # row, message
+    job_submitted = QtCore.Signal(int, str)  # row, Deadline job ID
 
     def __init__(self, jobs, deadline_host, deadline_port, log):
         super(DeadlineSubmissionWorker, self).__init__()
@@ -3711,6 +3946,7 @@ class DeadlineSubmissionWorker(QtCore.QObject):
                     num_successful_submissions += 1
                     self.item_update.emit(row, f"Job {str(job_id)[-8:]}",
                                           f"Submitted comp '{compName}' to Deadline. Job ID: {job_id}", True)
+                    self.job_submitted.emit(row, str(job_id))
                 except Exception as e:
                     self.log.error(traceback.format_exc())
                     self._fail(row, "Deadline refused", f"Failed to submit comp '{compName}' to Deadline: {e}")

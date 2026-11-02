@@ -940,6 +940,7 @@ class Ui_Dialog(object):
         self.openOutputFolderAction = QtGui.QAction("Open Output Folder", self.compTableWidget)
         self.requeueAction = QtGui.QAction("Re-queue", self.compTableWidget)
         self.requeueAction.setToolTip("Add a copy of the finished item to the render queue, ready to render again")
+        self.copyJobIdAction = QtGui.QAction("Copy Deadline Job ID", self.compTableWidget)
 
         # Context Menu
         # Parented to the table so the popup has an owner (an unparented QMenu is a
@@ -953,6 +954,7 @@ class Ui_Dialog(object):
         self.contextMenu.addAction(self.removeCompAction)
         self.contextMenu.addAction(self.openOutputFolderAction)
         self.contextMenu.addAction(self.requeueAction)
+        self.contextMenu.addAction(self.copyJobIdAction)
         self.contextMenu.addSeparator()
         self.contextMenu.addAction(self.refreshAction)
 

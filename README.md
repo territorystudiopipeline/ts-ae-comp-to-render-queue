@@ -36,6 +36,22 @@ The window uses the studio `ts_qt_utils` package: `StyleLoader` (dark theme) plu
 - Frame progress counts frames written since the render started (new files, or files whose
   modification time changed), listed on a worker thread. Movies show Rendering, then Done.
 
+## Deadline jobs
+
+- After a successful submission each item is unqueued in the render queue (so Render Locally or
+  Submit don't send it again) and its **Comment** gets `[Deadline <job id> <state>]`; any other
+  comment text is kept. There's no extra save: the tag is stored at the next normal save (After
+  Effects asks before closing a modified project).
+- Tagged items are read-only farm rows. While the window is open, `python/app/deadline_monitor.py`
+  asks the Deadline Web Service about all unfinished jobs in one request every 20s, on a worker
+  thread: Queued, On farm (tasks done / total, spinner), Suspended, Failed, Done, or Not found
+  (job deleted). The tag's state is updated when it changes.
+- Reopening the window rebuilds the farm rows from the comments (last known state straight away)
+  and catches up in one request. Completed jobs are finished rows, hidden unless Show finished is
+  ticked; **Clear Finished** removes them from the render queue too (failed ones stay).
+- Right-click a farm row: **Re-queue** clears the tag and queues the item again; **Copy Deadline
+  Job ID**. Ticking an item again by hand in After Effects makes it a normal editable row.
+
 ## Notes for developers
 
 - Anything that uses `engine.adobe` (the After Effects RPC bridge) or a Qt widget runs on the
