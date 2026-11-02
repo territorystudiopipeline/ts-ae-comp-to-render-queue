@@ -24,12 +24,15 @@ import traceback
 # by importing QT from sgtk rather than directly, we ensure that
 # the code will be compatible with both PySide and PyQt.
 from sgtk.platform.qt import QtCore, QtGui
-from .ui.dialog import Ui_Dialog, ItemSelectionDialog
+from .ui.dialog import Ui_Dialog, ItemSelectionDialog, ElidedLabel
 from .ui.theme import StatusTag, build_stylesheet
 from . import afterfx
+from . import render_monitor
 
 # standard toolkit logger
 logger = sgtk.platform.get_logger(__name__)
+
+STATUS_TITLES = {"done": "Done", "stopped": "Stopped", "failed": "Failed"}
 
 
 def show_dialog(app_instance):
@@ -122,6 +125,17 @@ class AppDialog(QtGui.QWidget):
         # Flags for multi-row propagation behavior.
         self._is_propagating_table_edit = False
         self._active_combo_selection_rows = []
+
+        # Finished render queue items are listed read-only, hidden unless Show finished is ticked
+        # (rows that finish while the window is open stay visible). Rows get a key so a local
+        # render can update them by key rather than by row number.
+        self._row_key_counter = 0
+        self._session_finished_indices = set()
+        self._render_monitor = None
+        self._hint_text = self.ui.hintLabel.text()
+        self._hint_timer = QtCore.QTimer(self)
+        self._hint_timer.setSingleShot(True)
+        self._hint_timer.timeout.connect(lambda: self.ui.hintLabel.setText(self._hint_text))
 
         # Look: ts_qt_utils stylesheet (if available), summary tags, Deadline summary
         self._summary_tags = {}
@@ -226,50 +240,45 @@ class AppDialog(QtGui.QWidget):
 
         return comps
 
+    # Table rows mirror the After Effects render queue, in order:
+    #   - QUEUED / NEEDS_OUTPUT / UNQUEUED items are editable rows (Include = the item's render flag)
+    #   - everything else (done, stopped, failed, rendering) is a read-only "finished" row,
+    #     hidden unless Show finished is ticked
+    ROW_FINISHED_ROLE = QtCore.Qt.UserRole + 1   # FINISHED / FINISHED_THIS_SESSION (ints: Qt keeps
+    ROW_FINISHED = 1                               # an item's first data type for a role, so a bool
+    ROW_FINISHED_THIS_SESSION = 2                  # can't later become a string)
+    ROW_KEY_ROLE = QtCore.Qt.UserRole + 2
+
     def create_table_entries(self):
         """
-            Create table entries for each of the comps
+            Rebuild the table from the After Effects render queue.
         """
-        # Clear the table
-
         self.ui.compTableWidget.setRowCount(0)
+        self.ui.compTableWidget.clearSpans()
 
         render_queue = self.adobe.app.project.renderQueue
+        num_items = render_queue.numItems
+        status = self.adobe.RQItemStatus
+        editable = (status.QUEUED, status.NEEDS_OUTPUT, status.UNQUEUED)
 
-        # Get render queue items
-        render_queue_items = self.adobe.app.project.renderQueue.items
-        logger.debug("Render Queue Items: %s" % render_queue_items)
+        for i in range(1, num_items + 1):
+            render_queue_item = render_queue.item(i)
+            item_status = render_queue_item.status
+            logger.debug("Render Queue Item %s status: %s" % (i, item_status))
+            if item_status in editable:
+                self.add_table_row(render_queue_item)
+            else:
+                self.add_finished_row(render_queue_item, item_status)
+                if i in self._session_finished_indices:
+                    self._set_row_session_finished(self.ui.compTableWidget.rowCount() - 1)
 
-        # Check if there are any render queue items, if not no comps were selected before running the dialog
-        if render_queue.numItems == 0:
-            self.update_empty_state(
-                "The render queue is empty.\n\nSelect comps in the Project panel, then click Add Selected Comps.")
-            return
-
-        # Filter out the render queue items by status
-        # Should only include items that match NEEDS_OUTPUT and QUEUED
-        filtered_render_queue_items = []
-        for i in range(1, render_queue.numItems + 1):
-            render_queue_item = self.adobe.app.project.renderQueue.item(i)
-            logger.debug("Render Queue Item: %s" % render_queue_item)
-            logger.debug("Render Queue Item Status: %s" % render_queue_item.status)
-
-            # Check if the render queue item is queued or needs output
-            if render_queue_item.status == self.adobe.RQItemStatus.QUEUED or render_queue_item.status == self.adobe.RQItemStatus.NEEDS_OUTPUT:
-                filtered_render_queue_items.append(render_queue_item)
-
-        # Check if any render queue items are selected
-        if len(filtered_render_queue_items) == 0:
-            self.update_empty_state(
-                "Nothing queued to render.\n\nThe render queue only has finished or stopped items: "
-                "use Clear Finished, then Add Selected Comps.")
-            return
-
-        # Add the comps to the table
-        for item in filtered_render_queue_items:
-            self.add_table_row(item)
+        self.apply_finished_filter()
         self.update_empty_state()
         self.refresh_summary()
+
+        # Opened (or refreshed) while After Effects is rendering: follow that render too
+        if num_items and self._render_monitor is None and render_queue.rendering:
+            self.start_render_monitor(already_rendering=True)
 
     def add_table_row(self, item):
         """
@@ -291,6 +300,7 @@ class AppDialog(QtGui.QWidget):
         comp_name = QtGui.QTableWidgetItem(item.comp.name)
         comp_name.setFlags(comp_name.flags() & ~QtCore.Qt.ItemIsEditable)
         comp_name.setData(QtCore.Qt.UserRole, item) # Store the render queue item in the user data
+        comp_name.setData(self.ROW_KEY_ROLE, self._next_row_key())
         self.ui.compTableWidget.setItem(rowPosition, 0, comp_name)
 
         # Add the status: an empty item (keeps selection/hover working) under a StatusTag
@@ -299,9 +309,13 @@ class AppDialog(QtGui.QWidget):
         self.ui.compTableWidget.setItem(rowPosition, 1, statusItem)
         self.ui.compTableWidget.setCellWidget(rowPosition, 1, StatusTag())
 
-        if item.status == self.adobe.RQItemStatus.QUEUED:
+        item_status = item.status
+        if item_status == self.adobe.RQItemStatus.QUEUED:
             self.set_row_status(rowPosition, "ready", "Template applied", "Template Applied | Ready to Render")
-        elif item.status == self.adobe.RQItemStatus.NEEDS_OUTPUT:
+        elif item_status == self.adobe.RQItemStatus.UNQUEUED:
+            self.set_row_status(rowPosition, "warning", "Not included",
+                                "UNQUEUED - Not Included in Render Queue (tick Include to queue it again)")
+        elif item_status == self.adobe.RQItemStatus.NEEDS_OUTPUT:
             self.set_row_status(rowPosition, "needs_output", "Apply a template", "Template Not Applied | Needs Output")
         else:
             self.set_row_status(rowPosition, "error", "Unknown status", "Unknown | Possible Error")
@@ -364,9 +378,334 @@ class AppDialog(QtGui.QWidget):
 
         # Include the render queue item checkbox
         includeCheckBox = QtGui.QTableWidgetItem()
-        includeCheckBox.setCheckState(QtCore.Qt.Checked)
+        # Include mirrors the item's render flag (unticked items are set to UNQUEUED on render)
+        includeCheckBox.setCheckState(
+            QtCore.Qt.Unchecked if item_status == self.adobe.RQItemStatus.UNQUEUED else QtCore.Qt.Checked)
         includeCheckBox.setToolTip("Include this item in the render queue")
         self.ui.compTableWidget.setItem(rowPosition, 6, includeCheckBox)
+
+    ####################################################################################################
+    # Finished rows and the Show finished filter
+    ####################################################################################################
+    FINISHED_TEXT_COLOUR = "#a09d98"
+
+    def _next_row_key(self):
+        self._row_key_counter += 1
+        return self._row_key_counter
+
+    def row_key(self, row):
+        item = self.ui.compTableWidget.item(row, 0)
+        return item.data(self.ROW_KEY_ROLE) if item is not None else None
+
+    def row_for_key(self, key):
+        """The current row of a row key, or -1."""
+        table = self.ui.compTableWidget
+        for row in range(table.rowCount()):
+            if self.row_key(row) == key:
+                return row
+        return -1
+
+    def is_row_finished(self, row):
+        """True for a read-only row (a render queue item that rendered, stopped or failed)."""
+        item = self.ui.compTableWidget.item(row, 0)
+        return bool(item is not None and item.data(self.ROW_FINISHED_ROLE))
+
+    def active_row_count(self):
+        """Rows that can still be applied, rendered or submitted."""
+        return sum(1 for row in range(self.ui.compTableWidget.rowCount()) if not self.is_row_finished(row))
+
+    def finished_status_for(self, item_status):
+        """(status key, title) for a render queue status that isn't editable."""
+        status = self.adobe.RQItemStatus
+        return {
+            status.DONE: ("done", "Done"),
+            status.USER_STOPPED: ("stopped", "Stopped"),
+            status.ERR_STOPPED: ("failed", "Failed"),
+            status.WILL_CONTINUE: ("stopped", "Will continue"),
+            status.RENDERING: ("busy", "Rendering"),
+        }.get(item_status, ("error", "Unknown"))
+
+    @staticmethod
+    def output_paths(render_queue_item):
+        """The output file paths of a render queue item (native paths)."""
+        paths = []
+        try:
+            for i in range(1, render_queue_item.numOutputModules + 1):
+                output_file = render_queue_item.outputModule(i).file
+                if output_file:
+                    paths.append(output_file.fsName)
+        except Exception as e:
+            logger.debug("Could not read output paths: %s" % e)
+        return paths
+
+    def add_finished_row(self, item, item_status):
+        """
+            Add a read-only row for a render queue item that isn't editable any more.
+        """
+        table = self.ui.compTableWidget
+        row = table.rowCount()
+        table.insertRow(row)
+
+        comp_name = QtGui.QTableWidgetItem(self._safe(lambda: item.comp.name, "?"))
+        comp_name.setFlags(comp_name.flags() & ~QtCore.Qt.ItemIsEditable)
+        comp_name.setData(QtCore.Qt.UserRole, item)
+        comp_name.setData(self.ROW_KEY_ROLE, self._next_row_key())
+        table.setItem(row, 0, comp_name)
+        status_item = QtGui.QTableWidgetItem("")
+        status_item.setFlags(status_item.flags() & ~QtCore.Qt.ItemIsEditable)
+        table.setItem(row, 1, status_item)
+        table.setCellWidget(row, 1, StatusTag())
+        for col in (5, 6):
+            table.setItem(row, col, QtGui.QTableWidgetItem())
+
+        outputs = self.output_paths(item)
+        self._make_row_read_only(row, outputs)
+        status, title = self.finished_status_for(item_status)
+        self.set_row_status(row, status, "", self._finished_tooltip(title, outputs), title=title)
+
+    def mark_row_finished(self, row, status, message, title=None, outputs=None):
+        """
+            Turn an editable row into a read-only finished row (after it rendered here).
+            It stays visible until the table is rebuilt from a fresh queue.
+        """
+        outputs = outputs if outputs is not None else self.output_paths(
+            self.ui.compTableWidget.item(row, 0).data(QtCore.Qt.UserRole))
+        self._make_row_read_only(row, outputs)
+        self._set_row_session_finished(row)
+        title = title or STATUS_TITLES.get(status, status)
+        self.set_row_status(row, status, message, self._finished_tooltip(title, outputs, message), title=title)
+
+    def _make_row_read_only(self, row, outputs):
+        table = self.ui.compTableWidget
+        was_blocked = table.blockSignals(True)  # no propagation from the check box changes below
+        try:
+            comp_item = table.item(row, 0)
+            if not comp_item.data(self.ROW_FINISHED_ROLE):
+                comp_item.setData(self.ROW_FINISHED_ROLE, self.ROW_FINISHED)
+            comp_item.setForeground(QtGui.QBrush(QtGui.QColor(self.FINISHED_TEXT_COLOUR)))
+            # Frame range, frame range type and template become one output path cell
+            for col in (2, 3, 4):
+                table.removeCellWidget(row, col)
+            if table.columnSpan(row, 2) != 3:
+                table.setSpan(row, 2, 1, 3)
+            label = ElidedLabel(outputs[0] if outputs else "")
+            label.setObjectName("finishedOutputLabel")
+            label.setContentsMargins(6, 0, 6, 0)
+            label.setToolTip("\n".join(outputs) if outputs else "No output")
+            table.setCellWidget(row, 2, label)
+            # No check boxes on a finished row
+            for col in (5, 6):
+                item = table.item(row, col)
+                if item is None:
+                    item = QtGui.QTableWidgetItem()
+                    table.setItem(row, col, item)
+                item.setData(QtCore.Qt.CheckStateRole, None)
+                item.setFlags(QtCore.Qt.ItemIsEnabled | QtCore.Qt.ItemIsSelectable)
+                item.setToolTip("")
+        finally:
+            table.blockSignals(was_blocked)
+
+    @staticmethod
+    def _finished_tooltip(title, outputs, message=""):
+        lines = [title + (": %s" % message if message else "")]
+        lines.extend(outputs or [])
+        return "\n".join(lines)
+
+    def _set_row_session_finished(self, row):
+        """Finished while the window is open: keep it visible with Show finished off."""
+        item = self.ui.compTableWidget.item(row, 0)
+        if item is not None:
+            item.setData(self.ROW_FINISHED_ROLE, self.ROW_FINISHED_THIS_SESSION)
+        self._session_finished_indices.add(row + 1)
+
+    def _on_render_queue_item_removed(self, index):
+        """Keep the remembered render queue indices in step when an item is removed."""
+        self._session_finished_indices = set(
+            i - 1 if i > index else i for i in self._session_finished_indices if i != index)
+
+    def apply_finished_filter(self, *args):
+        """
+            Hide finished rows unless Show finished is ticked (rows that finished in this
+            session stay visible), and show how many there are on the toggle.
+        """
+        table = self.ui.compTableWidget
+        show = self.ui.showFinishedCheckBox.isChecked()
+        finished = 0
+        for row in range(table.rowCount()):
+            item = table.item(row, 0)
+            state = item.data(self.ROW_FINISHED_ROLE) if item is not None else None
+            if state:
+                finished += 1
+            table.setRowHidden(row, state == self.ROW_FINISHED and not show)
+        self.ui.showFinishedCheckBox.setText("Show finished (%d)" % finished if finished else "Show finished")
+        self.update_empty_state()
+        self.refresh_summary()
+
+    @staticmethod
+    def _safe(func, default=None):
+        try:
+            return func()
+        except Exception:
+            return default
+
+    ####################################################################################################
+    # Context menu: per-row actions
+    ####################################################################################################
+    def update_context_menu(self):
+        """Enable the actions that make sense for the right-clicked row."""
+        row = getattr(self.ui, "contextMenuRow", -1)
+        valid = row is not None and row >= 0
+        finished = valid and self.is_row_finished(row)
+        self.ui.matchSelectedCompsAction.setEnabled(valid and not finished)
+        self.ui.jumpToCompAction.setEnabled(valid)
+        self.ui.removeCompAction.setEnabled(valid)
+        self.ui.openOutputFolderAction.setEnabled(valid)
+        self.ui.requeueAction.setEnabled(finished)
+        selected_finished = [r for r in self._get_selected_rows() if self.is_row_finished(r)]
+        count = len(selected_finished) if row in selected_finished else 1
+        self.ui.requeueAction.setText("Re-queue %d Items" % count if finished and count > 1 else "Re-queue")
+
+    def open_output_folder(self):
+        """Open the right-clicked row's output folder in Explorer / Finder."""
+        row = self.get_row_from_cursor()
+        item = self.ui.compTableWidget.item(row, 0) if row >= 0 else None
+        if item is None:
+            return
+        outputs = self.output_paths(item.data(QtCore.Qt.UserRole))
+        folder = os.path.dirname(outputs[0]) if outputs else ""
+        if not folder or not os.path.isdir(folder):
+            self.warning_box("Open Output Folder", "The output folder doesn't exist yet:\n\n%s" % (folder or "No output set"))
+            return
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(folder))
+
+    def requeue_finished_rows(self):
+        """
+            Re-queue the right-clicked finished row (and the other selected finished rows):
+            After Effects can't render a finished item again, so each one is duplicated, and
+            the duplicate of a Done item comes back Queued with the same settings.
+        """
+        row = self.get_row_from_cursor()
+        if row < 0 or not self.is_row_finished(row):
+            return
+        rows = [r for r in self._get_selected_rows() if self.is_row_finished(r)]
+        if row not in rows:
+            rows = [row]
+        count = 0
+        with self.supress_dialogs():
+            for r in rows:
+                render_queue_item = self.ui.compTableWidget.item(r, 0).data(QtCore.Qt.UserRole)
+                try:
+                    duplicate = render_queue_item.duplicate()
+                    if duplicate.status == self.adobe.RQItemStatus.UNQUEUED:
+                        duplicate.render = True
+                    count += 1
+                except Exception as e:
+                    logger.error("Could not re-queue %s: %s" % (self.ui.compTableWidget.item(r, 0).text(), e))
+        self.create_table_entries()
+        self.show_hint("Re-queued %d item%s" % (count, "" if count == 1 else "s"))
+
+    def show_hint(self, text, ms=10000):
+        """Show a short message in the toolbar's hint area for a while."""
+        self.ui.hintLabel.setText(text)
+        self._hint_timer.stop()
+        if ms:
+            self._hint_timer.start(ms)
+
+    ####################################################################################################
+    # Local render: follow it live (render_monitor.LocalRenderMonitor)
+    ####################################################################################################
+    def start_render_monitor(self, already_rendering=False):
+        """
+            Start the local render (unless After Effects is already rendering) and update the
+            table as each item renders.
+        """
+        table = self.ui.compTableWidget
+        queued = self.adobe.RQItemStatus.QUEUED
+        rendering = self.adobe.RQItemStatus.RENDERING
+        entries = []
+        for row in range(table.rowCount()):
+            comp_item = table.item(row, 0)
+            render_queue_item = comp_item.data(QtCore.Qt.UserRole) if comp_item else None
+            if render_queue_item is None:
+                continue
+            if self.is_row_finished(row) and not already_rendering:
+                continue
+            status = self._safe(lambda: render_queue_item.status)
+            if status not in (queued, rendering):
+                continue
+            expected = None
+            try:
+                expected = int(round(render_queue_item.timeSpanDuration * render_queue_item.comp.frameRate))
+            except Exception:
+                pass
+            entries.append({"key": self.row_key(row), "item": render_queue_item,
+                            "outputs": self.output_paths(render_queue_item), "expected": expected})
+
+        monitor = render_monitor.LocalRenderMonitor(
+            self.adobe, entries, count_frames=not already_rendering, parent=self)
+        monitor.item_changed.connect(self._on_render_item_changed)
+        monitor.finished.connect(self._on_render_finished)
+        self._render_monitor = monitor
+        # Locked while rendering (rows are updated by key; scrolling still works)
+        self.toggle_buttons(False)
+
+        if not already_rendering:
+            monitor.take_baselines()  # list existing frames before any are written
+            try:
+                self.adobe.app.project.renderQueue.renderAsync()
+            except Exception as e:
+                logger.error(traceback.format_exc())
+                monitor.stop()
+                self._render_monitor = None
+                self.toggle_buttons(True)
+                self.alert_box("Render", "After Effects could not start the render:\n\n%s" % e)
+                return
+        monitor.start()
+        self.show_hint("Rendering in After Effects…", ms=None)
+
+    def _on_render_item_changed(self, key, state, message):
+        row = self.row_for_key(key)
+        if row < 0:
+            return
+        if state == render_monitor.WAITING:
+            self.set_row_status(row, "waiting", message, "Waiting for the render to reach this comp")
+        elif state == render_monitor.RENDERING:
+            self.set_row_status(row, "busy", message, "Rendering in After Effects", title="Rendering")
+        elif state == render_monitor.NOT_RENDERED:
+            if not self.is_row_finished(row):
+                self.set_row_status(row, "ready", "Not rendered", "Still queued: the render ended before this comp")
+        else:
+            status = {render_monitor.DONE: "done", render_monitor.STOPPED: "stopped",
+                      render_monitor.FAILED: "failed"}[state]
+            outputs = None
+            monitor = self._render_monitor
+            if monitor is not None and key in monitor._by_key:
+                outputs = monitor._by_key[key]["outputs"]
+            if self.is_row_finished(row):
+                title = STATUS_TITLES.get(status, status)
+                self.set_row_status(row, status, message, self._finished_tooltip(title, outputs or [], message),
+                                    title=title)
+                self._set_row_session_finished(row)
+            else:
+                self.mark_row_finished(row, status, message, outputs=outputs)
+            self.apply_finished_filter()
+
+    def _on_render_finished(self, summary):
+        self._render_monitor = None
+        self.toggle_buttons(True)
+        self.refresh_table_item_data()
+        counts = summary.get("counts", {})
+        parts = []
+        for state, label in ((render_monitor.DONE, "done"), (render_monitor.FAILED, "failed"),
+                             (render_monitor.STOPPED, "stopped"), (render_monitor.NOT_RENDERED, "not rendered")):
+            if counts.get(state):
+                parts.append("%d %s" % (counts[state], label))
+        text = "Render finished in %s: %s" % (render_monitor.format_seconds(summary.get("seconds", 0)),
+                                              ", ".join(parts) or "nothing rendered")
+        if summary.get("error"):
+            text = "Stopped following the render: %s" % summary["error"]
+        logger.info(text)
+        self.show_hint(text, ms=30000)
 
     def populate_presets(self, widget=None):
         """
@@ -432,6 +771,10 @@ class AppDialog(QtGui.QWidget):
         self.ui.removeSelectedCompsAction.triggered.connect(self.remove_selected_comps)
         self.ui.matchSelectedCompsAction.triggered.connect(self.match_selected_to_current_row)
         self.ui.refreshAction.triggered.connect(self.create_table_entries)
+        self.ui.openOutputFolderAction.triggered.connect(self.open_output_folder)
+        self.ui.requeueAction.triggered.connect(self.requeue_finished_rows)
+        self.ui.contextMenu.aboutToShow.connect(self.update_context_menu)
+        self.ui.showFinishedCheckBox.toggled.connect(self.apply_finished_filter)
 
         # Propagation signals
         self.ui.compTableWidget.itemChanged.connect(self._on_table_item_changed)
@@ -539,7 +882,10 @@ class AppDialog(QtGui.QWidget):
             return None
         comp_name = tableItem.text()
         render_queue = self.adobe.app.project.renderQueue
-        renderable = (self.adobe.RQItemStatus.QUEUED, self.adobe.RQItemStatus.NEEDS_OUTPUT)
+        if self.is_row_finished(row):
+            return tableItem.data(QtCore.Qt.UserRole)
+        renderable = (self.adobe.RQItemStatus.QUEUED, self.adobe.RQItemStatus.NEEDS_OUTPUT,
+                      self.adobe.RQItemStatus.UNQUEUED)
 
         if row + 1 <= render_queue.numItems:
             candidate = render_queue.item(row + 1)
@@ -549,7 +895,7 @@ class AppDialog(QtGui.QWidget):
         # Same comp may be queued more than once: count which occurrence this row is.
         occurrence = sum(
             1 for r in range(row)
-            if self.ui.compTableWidget.item(r, 0) is not None
+            if self.ui.compTableWidget.item(r, 0) is not None and not self.is_row_finished(r)
             and self.ui.compTableWidget.item(r, 0).text() == comp_name
         )
         seen = 0
@@ -568,6 +914,8 @@ class AppDialog(QtGui.QWidget):
         Refresh only the UserRole data for each table row, preserving status icons/tooltips.
         """
         for row in range(self.ui.compTableWidget.rowCount()):
+            if self.is_row_finished(row):
+                continue
             try:
                 # Fetch the latest render queue item for this row
                 render_queue_item = self.find_render_queue_item_for_row(row)
@@ -596,7 +944,7 @@ class AppDialog(QtGui.QWidget):
 
         logger.debug("Applying to render queue items")
         try:
-            if self.ui.compTableWidget.rowCount() == 0:
+            if self.active_row_count() == 0:
                 self.alert_box("No render queue items", "Please add some render queue items to apply the changes to")
                 return
 
@@ -604,6 +952,8 @@ class AppDialog(QtGui.QWidget):
             count = 0
             total_rows = self.ui.compTableWidget.rowCount()
             for row in range(total_rows):
+                if self.is_row_finished(row):
+                    continue
                 tableItem = self.ui.compTableWidget.item(row, 0)
                 frameRangeComboBox = self.ui.compTableWidget.cellWidget(row, 3)
                 renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
@@ -629,6 +979,13 @@ class AppDialog(QtGui.QWidget):
                     try:
                         render_queue_item = tableItem.data(QtCore.Qt.UserRole)
                         comp = render_queue_item.comp
+
+                        # Included again after being left out: queue it (UNQUEUED -> QUEUED)
+                        if render_queue_item.status == self.adobe.RQItemStatus.UNQUEUED:
+                            try:
+                                render_queue_item.render = True
+                            except Exception as e:
+                                logger.debug("Could not re-queue %s: %s" % (comp.name, e))
 
                         # Defensive type check for comp
                         if not hasattr(comp, 'name'):
@@ -924,7 +1281,7 @@ class AppDialog(QtGui.QWidget):
             return False
 
         # If there are rows in the table
-        if self.ui.compTableWidget.rowCount() == 0:
+        if self.active_row_count() == 0:
             self.warning_box("No render queue items available",
                              "Please add some render queue items or refresh the table to Render the current items")
             return False
@@ -952,6 +1309,8 @@ class AppDialog(QtGui.QWidget):
         count = 0
 
         for row in range(num_items):
+            if self.is_row_finished(row):
+                continue
             tableItem = self.ui.compTableWidget.item(row, 0)
             renderFormatDropdown = self.ui.compTableWidget.cellWidget(row, 4)
             useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)
@@ -1088,6 +1447,7 @@ class AppDialog(QtGui.QWidget):
                     count += 1
 
         logger.debug("Clear Render Queue Items Processed: %s" % count)
+        self._session_finished_indices.clear()  # indices have shifted
 
         # Refresh Table
         self.create_table_entries()
@@ -1248,7 +1608,7 @@ class AppDialog(QtGui.QWidget):
 
             returns: None
         """
-        if self.ui.compTableWidget.rowCount() == 0:
+        if self.active_row_count() == 0:
             self.warning_box("Render", "There is nothing in the table to render.")
             return
 
@@ -1269,9 +1629,9 @@ class AppDialog(QtGui.QWidget):
         # Bring Render Queue to front
         self.adobe.app.project.renderQueue.showWindow(True)
 
-        # Render the current render queue items
+        # Render the current render queue items, and follow the render in the table
         logger.debug("Starting render of current render queue items")
-        self.adobe.app.project.renderQueue.renderAsync()
+        self.start_render_monitor()
 
     def run_project_checks(self):
         """
@@ -1312,9 +1672,13 @@ class AppDialog(QtGui.QWidget):
     # nothing moves as counts change; the occasional ones sit on the left and only appear when
     # they have rows, so they never push the core tags around.
     SUMMARY_OCCASIONAL = (
+        ("done", "Done"),
+        ("stopped", "Stopped"),
         ("rendering", "Render ready"),
         ("warning", "Skipped"),
     )
+    # Statuses counted under another summary tag
+    SUMMARY_ALIASES = {"failed": "error", "waiting": "busy"}
     SUMMARY_CORE = (
         ("ready", "Ready"),
         ("needs_output", "Needs output"),
@@ -1449,8 +1813,12 @@ class AppDialog(QtGui.QWidget):
             Update the header tags with the number of rows in each status.
         """
         counts = {}
-        for row in range(self.ui.compTableWidget.rowCount()):
+        table = self.ui.compTableWidget
+        for row in range(table.rowCount()):
+            if table.isRowHidden(row):
+                continue
             status = self.row_status(row)
+            status = self.SUMMARY_ALIASES.get(status, status)
             counts[status] = counts.get(status, 0) + 1
 
         core_keys = [key for key, _ in self.SUMMARY_CORE]
@@ -1471,9 +1839,17 @@ class AppDialog(QtGui.QWidget):
             Show the empty-state message over the table when it has no rows.
         """
         label = self.ui.emptyStateLabel
-        if text:
-            label.setText(text)
-        empty = self.ui.compTableWidget.rowCount() == 0
+        table = self.ui.compTableWidget
+        hidden = sum(1 for row in range(table.rowCount()) if table.isRowHidden(row))
+        if not text:
+            if table.rowCount() == 0:
+                text = "The render queue is empty.\n\nSelect comps in the Project panel, then click Add Selected Comps."
+            else:
+                text = ("Nothing queued to render.\n\n%d finished item%s hidden: tick Show finished to see them, "
+                        "or select comps in the Project panel and click Add Selected Comps."
+                        % (hidden, " is" if hidden == 1 else "s are"))
+        label.setText(text)
+        empty = table.rowCount() == hidden
         if empty:
             label.resize(self.ui.compTableWidget.viewport().size())
         label.setVisible(empty)
@@ -1514,6 +1890,7 @@ class AppDialog(QtGui.QWidget):
             settings = QtCore.QSettings(*self.UI_SETTINGS)
             settings.setValue("table_header", self.ui.compTableWidget.horizontalHeader().saveState())
             settings.setValue("window_geometry", self.window().saveGeometry())
+            settings.setValue("show_finished", self.ui.showFinishedCheckBox.isChecked())
         except Exception as e:
             logger.debug("Could not save UI state: %s" % e)
 
@@ -1523,6 +1900,8 @@ class AppDialog(QtGui.QWidget):
         """
         try:
             settings = QtCore.QSettings(*self.UI_SETTINGS)
+            show_finished = settings.value("show_finished", False)
+            self.ui.showFinishedCheckBox.setChecked(show_finished in (True, "true", "1", 1))
             header_state = settings.value("table_header")
             if header_state:
                 self.ui.compTableWidget.horizontalHeader().restoreState(header_state)
@@ -1667,6 +2046,10 @@ class AppDialog(QtGui.QWidget):
             )
             event.ignore()
             return
+        # A local render carries on in After Effects; just stop following it
+        if self._render_monitor is not None:
+            self._render_monitor.stop()
+            self._render_monitor = None
         self.save_ui_state()
         super(AppDialog, self).closeEvent(event)
 
@@ -1830,6 +2213,9 @@ class AppDialog(QtGui.QWidget):
 
             Returns: None
         """
+        # Stay locked while a local render is being followed
+        if state and getattr(self, "_render_monitor", None) is not None:
+            state = False
         self.ui.applyButton.setEnabled(state)
         self.ui.addButton.setEnabled(state)
         self.ui.submitButton.setEnabled(state)
@@ -1929,7 +2315,8 @@ class AppDialog(QtGui.QWidget):
         if self._is_propagating_table_edit:
             return
 
-        selected_rows = self._effective_selected_rows(source_row, preferred_rows=preferred_rows)
+        selected_rows = [row for row in self._effective_selected_rows(source_row, preferred_rows=preferred_rows)
+                         if not self.is_row_finished(row)]
 
         # Only propagate when editing a selected row and multi-row selection exists.
         if len(selected_rows) <= 1 or source_row not in selected_rows:
@@ -2133,6 +2520,7 @@ class AppDialog(QtGui.QWidget):
             if render_queue_item is not None:
                 logger.debug("Removing comp: %s" % render_queue_item.comp.name)
                 render_queue_item.remove()
+                self._on_render_queue_item_removed(row + 1)
             self.ui.compTableWidget.removeRow(row)
             self.update_empty_state()
             self.refresh_summary()
@@ -2152,9 +2540,12 @@ class AppDialog(QtGui.QWidget):
         logger.debug("Removing selected comps: %s" % selected_rows)
         # Remove from the bottom up so the remaining row numbers don't shift
         for row in sorted((index.row() for index in selected_rows), reverse=True):
+            if self.ui.compTableWidget.isRowHidden(row):
+                continue  # selected with Ctrl+A while hidden: leave it
             render_queue_item = self.find_render_queue_item_for_row(row)
             if render_queue_item is not None:
                 render_queue_item.remove()
+                self._on_render_queue_item_removed(row + 1)
             self.ui.compTableWidget.removeRow(row)
 
         logger.debug("Comps removed")
@@ -2192,7 +2583,11 @@ class AppDialog(QtGui.QWidget):
 
         logger.debug("Updating selected rows to match current row: %s" % current_row)
         # Apply the changes to the selected rows
+        if self.is_row_finished(current_row):
+            return
         for row in selected_rows:
+            if self.is_row_finished(row.row()) or self.ui.compTableWidget.isRowHidden(row.row()):
+                continue
             if row.row() != current_row:  # Avoid self-updating
                 logger.debug("Updating row: %s" % row.row())
                 # Set the frame range
@@ -2979,7 +3374,7 @@ class AppDialog(QtGui.QWidget):
         if not self.run_project_checks():
             return jobs, "Project checks failed"
 
-        if self.ui.compTableWidget.rowCount() == 0:
+        if self.active_row_count() == 0:
             return jobs, "No render queue items available"
 
         deadline_settings = self.get_deadline_settings()
@@ -2991,6 +3386,8 @@ class AppDialog(QtGui.QWidget):
         project_path = self.adobe.app.project.file.fsName
 
         for row in range(self.ui.compTableWidget.rowCount()):
+            if self.is_row_finished(row):
+                continue
             tableItem = self.ui.compTableWidget.item(row, 0)
             includeCheckBox = self.ui.compTableWidget.item(row, 6)
             useCompNameCheckBox = self.ui.compTableWidget.item(row, 5)

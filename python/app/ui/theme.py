@@ -83,6 +83,11 @@ STATUSES = {
     "busy": ("busy", "Working", "refresh_icon.png"),
     "submitted": ("submitted", "Submitted", "submit_icon.png"),
     "rendering": ("info", "Render ready", "clear_icon.png"),
+    # Local render (render_monitor) and finished render queue items
+    "waiting": ("neutral", "Waiting", None),
+    "done": ("done", "Done", None),
+    "stopped": ("warning", "Stopped", "warning_icon.png"),
+    "failed": ("error", "Failed", "error_icon.png"),
     # Greyed, e.g. a header summary tag with no rows
     "idle": ("neutral", "", None),
 }
@@ -93,6 +98,8 @@ APP_STATE_STYLES = {
     # Gold like the primary button; the loading spinner is tinted with this colour
     "busy": {"title_bg": _TOKENS["ACCENT"], "title_fg": _TOKENS["BG"], "message_fg": _TOKENS["TEXT_SEC"]},
     "neutral": {"title_bg": _TOKENS["ELEVATED2"], "title_fg": _TOKENS["TEXT_SEC"], "message_fg": _TOKENS["TEXT_SEC"]},
+    # Quieter than Ready (finished rows are history): grey with a green tick and green text
+    "done": {"title_bg": _TOKENS["ELEVATED2"], "title_fg": "#8FD19B", "message_fg": _TOKENS["TEXT_SEC"]},
 }
 # Message text for the built-in states: secondary text reads better inside a table.
 for _state in ("critical", "error", "warning", "info"):
@@ -110,11 +117,32 @@ def _blank_icon(size=14):
     return QtGui.QIcon(pixmap)
 
 
+def _check_icon(size=14, colour="#7FD18B"):
+    """A tick, drawn (the app has no check mark icon)."""
+    pixmap = QtGui.QPixmap(size * 2, size * 2)  # drawn at 2x for high-dpi screens
+    pixmap.fill(QtCore.Qt.transparent)
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    pen = QtGui.QPen(QtGui.QColor(colour), size * 0.32)
+    pen.setCapStyle(QtCore.Qt.RoundCap)
+    pen.setJoinStyle(QtCore.Qt.RoundJoin)
+    painter.setPen(pen)
+    s = size * 2.0
+    path = QtGui.QPainterPath(QtCore.QPointF(s * 0.2, s * 0.53))
+    path.lineTo(QtCore.QPointF(s * 0.42, s * 0.74))
+    path.lineTo(QtCore.QPointF(s * 0.8, s * 0.28))
+    painter.drawPath(path)
+    painter.end()
+    pixmap.setDevicePixelRatio(2.0)
+    return QtGui.QIcon(pixmap)
+
+
 def _app_state_icons():
     return {
         "submitted": _icon("submit_icon.png"),
         "busy": _icon("refresh_icon.png"),
         "neutral": _blank_icon(),
+        "done": _check_icon(),
     }
 
 
@@ -215,6 +243,12 @@ class StatusTag(QtGui.QWidget):
             self._tag.adjustSize()
         else:
             self._icon_label.setFixedSize(16, 16)
-            self._icon_label.setPixmap(_icon(icon_file).pixmap(16, 16) if icon_file else _blank_icon(16).pixmap(16, 16))
+            if icon_file:
+                icon = _icon(icon_file)
+            elif status == "done":
+                icon = _check_icon(16)
+            else:
+                icon = _blank_icon(16)
+            self._icon_label.setPixmap(icon.pixmap(16, 16))
             self._text_label.setText("%s  %s" % (title, message) if message else title)
         self.setToolTip(tooltip or (("%s: %s" % (title, message)) if message else title))

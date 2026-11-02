@@ -937,6 +937,9 @@ class Ui_Dialog(object):
         self.removeSelectedCompsAction = QtGui.QAction("Remove Selected Comps", self.compTableWidget)
         self.matchSelectedCompsAction = QtGui.QAction("Match Selected Comps", self.compTableWidget)
         self.refreshAction = QtGui.QAction("Refresh", self.compTableWidget)
+        self.openOutputFolderAction = QtGui.QAction("Open Output Folder", self.compTableWidget)
+        self.requeueAction = QtGui.QAction("Re-queue", self.compTableWidget)
+        self.requeueAction.setToolTip("Add a copy of the finished item to the render queue, ready to render again")
 
         # Context Menu
         # Parented to the table so the popup has an owner (an unparented QMenu is a
@@ -948,6 +951,8 @@ class Ui_Dialog(object):
         self.contextMenu.addSeparator()
         self.contextMenu.addAction(self.jumpToCompAction)
         self.contextMenu.addAction(self.removeCompAction)
+        self.contextMenu.addAction(self.openOutputFolderAction)
+        self.contextMenu.addAction(self.requeueAction)
         self.contextMenu.addSeparator()
         self.contextMenu.addAction(self.refreshAction)
 
@@ -994,6 +999,11 @@ class Ui_Dialog(object):
         self.clearButton.setIcon(self.clearQueueIcon)
         self.clearButton.setToolTip("Remove finished and stopped items from the After Effects render queue")
 
+        # Finished render queue items are listed but hidden unless this is ticked
+        self.showFinishedCheckBox = QtGui.QCheckBox("Show finished", Dialog)
+        self.showFinishedCheckBox.setObjectName("showFinishedCheckBox")
+        self.showFinishedCheckBox.setToolTip("Show render queue items that have already rendered, stopped or failed")
+
         self.hintLabel = QtGui.QLabel("Select rows, then change a value to apply it to all of them")
         self.hintLabel.setObjectName("hintLabel")
         # Gives way first when the window is narrow
@@ -1008,6 +1018,8 @@ class Ui_Dialog(object):
 
         for button in (self.addButton, self.refreshButton, self.clearButton):
             self.toolbarLayout.addWidget(button)
+        self.toolbarLayout.addSpacing(6)
+        self.toolbarLayout.addWidget(self.showFinishedCheckBox)
         self.toolbarLayout.addWidget(self.hintLabel, 1)
         self.toolbarLayout.addWidget(self.applyButton)
         self.mainLayout.addLayout(self.toolbarLayout)

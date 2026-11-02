@@ -21,6 +21,21 @@ The window uses the studio `ts_qt_utils` package: `StyleLoader` (dark theme) plu
   to a different binding than Toolkit (mixing bindings crashes Qt), the app logs a warning and
   falls back to plain status labels and the default Toolkit look.
 
+## Table and local renders
+
+- The table lists every render queue item, in queue order. Queued, needs-output and unqueued
+  items are editable (Include mirrors the item's render flag). Done, stopped and failed items are
+  read-only rows showing their output path, hidden unless **Show finished** is ticked.
+  Rows that finish while the window is open stay visible.
+- Right-click a finished row to **Re-queue** it (After Effects duplicates it as a queued copy)
+  or **Open Output Folder**.
+- **Render Locally** follows the render live (`python/app/render_monitor.py`): Waiting, then
+  Rendering with frame progress for image sequences, then Done / Failed / Stopped with the time
+  taken. The window is locked until the render ends; closing it just stops following (After
+  Effects keeps rendering). Opening or refreshing the window during a render follows it too.
+- Frame progress counts frames written since the render started (new files, or files whose
+  modification time changed), listed on a worker thread. Movies show Rendering, then Done.
+
 ## Notes for developers
 
 - Anything that uses `engine.adobe` (the After Effects RPC bridge) or a Qt widget runs on the

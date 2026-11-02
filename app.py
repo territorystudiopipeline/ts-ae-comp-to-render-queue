@@ -9,8 +9,6 @@
 # not expressly granted therein are reserved by Shotgun Software Inc.
 
 
-import os
-
 from sgtk.platform import Application
 
 
@@ -41,8 +39,3 @@ class StgkStarterApp(Application):
 
         # now register the command with the engine
         self.engine.register_command("Add Comp to Render Queue...", menu_callback)
-
-        # SPIKE (temporary): live local render polling test, only with TS_AE_RENDER_SPIKE=1
-        if os.environ.get("TS_AE_RENDER_SPIKE") == "1":
-            spike = self.import_module("app").spike_render_poll
-            self.engine.register_command("Render Queue Spike...", lambda: spike.run(self))
