@@ -9,6 +9,8 @@
 # not expressly granted therein are reserved by Shotgun Software Inc.
 
 
+import os
+
 from sgtk.platform import Application
 
 
@@ -39,3 +41,8 @@ class StgkStarterApp(Application):
 
         # now register the command with the engine
         self.engine.register_command("Add Comp to Render Queue...", menu_callback)
+
+        # SPIKE (temporary): proxy pre-render tests, only with TS_AE_PROXY_SPIKE=1
+        if os.environ.get("TS_AE_PROXY_SPIKE") == "1":
+            spike = self.import_module("app").spike_proxy
+            self.engine.register_command("Proxy Spike...", lambda: spike.run(self))
