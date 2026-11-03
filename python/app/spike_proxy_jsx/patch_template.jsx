@@ -13,8 +13,9 @@ var SPIKE = %(config)s;
         var ps = P.proxySource;
         spStep(R, "conformFrameRate", function () { ps.conformFrameRate = P.frameRate; return ps.conformFrameRate; });
         spStep(R, "alphaMode", function () { ps.alphaMode = AlphaMode.PREMULTIPLIED; return String(ps.alphaMode); });
-        for (var key in SPIKE.colourTries) {
-            (function (k, v) { spStep(R, "set proxy " + k, function () { ps[k] = v; return ps[k]; }); })(key, SPIKE.colourTries[key]);
+        var tryKeys = spKeys(SPIKE.colourTries);
+        for (var t = 0; t < tryKeys.length; t++) {
+            (function (k, v) { spStep(R, "set proxy " + k, function () { ps[k] = v; return ps[k]; }); })(tryKeys[t], SPIKE.colourTries[tryKeys[t]]);
         }
         spStep(R, "useProxy", function () { P.useProxy = true; return P.useProxy; });
         R.proxyValues = spValues(ps, SP_COLOUR);

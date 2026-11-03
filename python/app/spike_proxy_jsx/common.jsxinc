@@ -1,4 +1,15 @@
 // SPIKE helpers (no JSON object in older ExtendScript)
+// Something in this After Effects adds a "unique_id" function to Object.prototype, so every
+// for-in loop must skip inherited keys and functions.
+function spKeys(obj) {
+    var keys = [];
+    for (var k in obj) {
+        if (!obj.hasOwnProperty(k)) continue;
+        if (typeof obj[k] === "function") continue;
+        keys.push(k);
+    }
+    return keys;
+}
 function spEsc(s) {
     return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r/g, "\\r").replace(/\n/g, "\\n");
 }
@@ -9,6 +20,7 @@ function spSer(v, depth) {
     if (t === "number") return isFinite(v) ? String(v) : '"' + String(v) + '"';
     if (t === "boolean") return String(v);
     if (t === "string") return '"' + spEsc(v) + '"';
+    if (t === "function") return "null";
     if (depth > 5) return '"<deep>"';
     if (v instanceof Array) {
         var a = [];
@@ -16,8 +28,9 @@ function spSer(v, depth) {
         return "[" + a.join(",") + "]";
     }
     if (t === "object" && (v.constructor === Object)) {
-        var parts = [];
-        for (var k in v) {
+        var parts = [], keys = spKeys(v);
+        for (var n = 0; n < keys.length; n++) {
+            var k = keys[n];
             try { parts.push('"' + spEsc(k) + '":' + spSer(v[k], depth + 1)); } catch (e) {}
         }
         return "{" + parts.join(",") + "}";
@@ -45,6 +58,7 @@ function spValues(obj, pattern) {
     var names = spReflect(obj).props;
     for (var i = 0; i < names.length; i++) {
         if (pattern && !pattern.test(names[i])) continue;
+        if (names[i] === "unique_id" || names[i] === "__proto__") continue;
         try { var v = obj[names[i]]; out[names[i]] = (v === null || typeof v === "number" || typeof v === "boolean" || typeof v === "string") ? v : String(v); }
         catch (e) { out[names[i]] = "<error: " + e + ">"; }
     }

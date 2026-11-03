@@ -258,6 +258,12 @@ class ProxySpikeWidget(QtGui.QWidget):
                 "testFrame": TEST_FRAME, "colourTries": colour_tries}
 
         def work(emit):
+            # Start clean: leftovers from an earlier (failed) run would be mixed into the results
+            for sub in ("proxies", "verify", "farm"):
+                shutil.rmtree(os.path.join(folder, sub), ignore_errors=True)
+            for name in ("proxy_spike.aep", "local_result.json"):
+                if os.path.isfile(os.path.join(folder, name)):
+                    os.remove(os.path.join(folder, name))
             self._run_jsx("local_test.jsx", args, emit, timeout=900)
             data = _load(out)
             for step in data.get("steps", []):

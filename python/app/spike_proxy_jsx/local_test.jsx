@@ -60,6 +60,7 @@
         return info;
     }
     function queue(comp, file, fmt, start, count, proxyUse) {
+        if (!(comp instanceof CompItem)) throw new Error("not a comp: " + comp);
         var rq = proj.renderQueue.items.add(comp);
         rq.timeSpanStart = start / comp.frameRate;
         rq.timeSpanDuration = count / comp.frameRate;
@@ -120,16 +121,19 @@
         spStep(R, fmt + ": alphaMode premultiplied", function () { ps.alphaMode = AlphaMode.PREMULTIPLIED; return String(ps.alphaMode); });
         // Optional colour settings to try, from step 1's findings: {"propertyName": value}
         var tries = (A.colourTries || {})[fmt] || {};
-        for (var key in tries) {
+        var tryKeys = spKeys(tries);
+        for (var t = 0; t < tryKeys.length; t++) {
             (function (k2, v2) {
                 spStep(R, fmt + ": set proxy " + k2, function () { ps[k2] = v2; return ps[k2]; });
-            })(key, tries[key]);
+            })(tryKeys[t], tries[tryKeys[t]]);
         }
         spStep(R, fmt + ": useProxy", function () { P.useProxy = true; return P.useProxy; });
         info.after = spValues(ps, SP_COLOUR);
         info.duration = ps.duration !== undefined ? ps.duration : null;
         info.renders = [];
-        for (var hn in hosts) {
+        var hostNames = spKeys(hosts);
+        for (var h = 0; h < hostNames.length; h++) {
+            var hn = hostNames[h];
             info.renders.push(queue(hosts[hn], folder + "/verify/" + fmt + "_" + hn + "_[####].exr", "exr", testFrame, 1,
                                     "Use Comp Proxies Only"));
         }
