@@ -118,7 +118,10 @@ class ProxySpikeWidget(QtGui.QWidget):
         self.inspect_button = QtGui.QPushButton("1. Inspect scripting")
         self.local_button = QtGui.QPushButton("2. Local proxy test (new empty project)")
         self.farm_button = QtGui.QPushButton("3. Farm patch test")
-        for button in (self.inspect_button, self.local_button, self.farm_button):
+        self.prelink_button = QtGui.QPushButton("4. Pre-linked proxies (new empty project)")
+        self.prelink_button.setToolTip("Proxies linked before the save to placeholder frames; farm jobs are plain\n"
+                                       "After Effects (aerender) jobs only. Needs a new, empty project.")
+        for button in self._buttons():
             row.addWidget(button)
         layout.addLayout(row)
 
@@ -134,6 +137,10 @@ class ProxySpikeWidget(QtGui.QWidget):
         self.inspect_button.clicked.connect(self.run_inspect)
         self.local_button.clicked.connect(self.run_local_test)
         self.farm_button.clicked.connect(self.run_farm_test)
+        self.prelink_button.clicked.connect(self.run_prelink_test)
+
+    def _buttons(self):
+        return (self.inspect_button, self.local_button, self.farm_button, self.prelink_button)
 
     def _default_pool(self):
         try:
@@ -177,7 +184,7 @@ class ProxySpikeWidget(QtGui.QWidget):
             return
         self._save_fields()
         self._busy = True
-        for button in (self.inspect_button, self.local_button, self.farm_button):
+        for button in self._buttons():
             button.setEnabled(False)
         thread = QtCore.QThread()
         task = _Task(func)
@@ -193,7 +200,7 @@ class ProxySpikeWidget(QtGui.QWidget):
 
     def _finished(self, result, on_done):
         self._busy = False
-        for button in (self.inspect_button, self.local_button, self.farm_button):
+        for button in self._buttons():
             button.setEnabled(True)
         if on_done and result is not None:
             on_done(result)
@@ -381,6 +388,96 @@ class ProxySpikeWidget(QtGui.QWidget):
             self._copy_results([patch_result] + outputs, emit)
             if os.path.isfile(patch_result):
                 emit("Patch result: %s" % json.dumps(_load(patch_result), indent=1)[:3000])
+            return True
+
+        self._start(work)
+
+    # ------------------------------------------------------------------ step 4
+
+    def run_prelink_test(self):
+        """
+            Proxies linked before the save (placeholder frames, switch off / on), then plain
+            After Effects jobs: proxy sources render over the placeholders, hosts render with
+            Use Comp Proxies Only after them.
+        """
+        try:
+            folder = self._folder()
+        except Exception as e:
+            self.log(str(e))
+            return
+        if self.adobe.app.project.numItems > 0:
+            self.log("Step 4 needs a NEW, EMPTY project: File > New > New Project, then run it again.")
+            return
+        root = os.path.join(folder, "prelink")
+        out = os.path.join(root, "prelink_result.json")
+        args = {"out": out.replace("\\", "/"), "folder": folder.replace("\\", "/"), "fps": FPS, "frames": FRAMES, "size": SIZE}
+        pool, group = self.pool_edit.text().strip(), self.group_edit.text().strip()
+        host, port = self._app.get_setting("deadline_host"), self._app.get_setting("deadline_port")
+        version = ".".join(self.adobe.app.version.split("x")[0].split(".")[:2])
+        ae_version = self.adobe.app.version
+        stamp = datetime.datetime.now().strftime("%H%M%S")
+        results_dir = os.path.join(self.results_dir, "prelink_%s" % stamp)
+
+        def work(emit):
+            shutil.rmtree(root, ignore_errors=True)
+            os.makedirs(root, exist_ok=True)
+            self._run_jsx("prelink_test.jsx", args, emit, timeout=900)
+            data = _load(out)
+            for step in data.get("steps", []):
+                emit("%s %s: %s" % ("ok  " if step.get("ok") else "FAIL", step["name"],
+                                    json.dumps(step.get("value") if step.get("ok") else step.get("error"))[:300]))
+            if any(not step.get("ok") for step in data.get("steps", [])):
+                emit("Local setup failed: not submitting.")
+                return True
+            scene = os.path.join(root, "prelink.aep")
+
+            import Deadline.DeadlineConnect as Connect
+            deadline = Connect.DeadlineCon(host, port)
+            base = {"Plugin": "AfterEffects", "Pool": pool, "Group": group, "UserName": os.environ.get("USERNAME", ""),
+                    "BatchName": "TS proxy spike prelink %s" % stamp, "TaskTimeoutMinutes": 20,
+                    "Frames": "0-%d" % (FRAMES - 1), "ChunkSize": 1000, "MachineLimit": 1}
+
+            def submit(name, comp, depends=""):
+                job = dict(base, Name="proxy spike %s - %s" % (stamp, name), JobDependencies=depends)
+                plugin = {"SceneFile": scene, "Comp": comp, "Version": version, "SubmittedFromVersion": ae_version}
+                result = deadline.Jobs.SubmitJob(job, plugin)
+                if not isinstance(result, dict) or "_id" not in result:
+                    raise RuntimeError("%s refused: %s" % (name, result))
+                emit("Submitted %s: %s" % (name, result["_id"]))
+                return result["_id"]
+
+            proxy_ids = [submit("proxy SRC_off", "SRC_off"), submit("proxy SRC_on", "SRC_on")]
+            main_ids = [submit("main H_off (switch off)", "H_off", ",".join(proxy_ids)),
+                        submit("main H_on (switch on)", "H_on", ",".join(proxy_ids))]
+            ids = proxy_ids + main_ids
+            emit("Polling every 10s (up to 30 min)")
+            last, end = None, time.time() + 30 * 60
+            while time.time() < end:
+                jobs = deadline.Jobs.GetJobs(ids)
+                if isinstance(jobs, list):
+                    states = dict((job["_id"][-6:], (job.get("Stat"), job.get("CompletedChunks"), job.get("FailedChunks")))
+                                  for job in jobs)
+                    if states != last:
+                        emit("states (Stat, done, failed): %s" % states)
+                        last = states
+                    stats = [v[0] for v in states.values()]
+                    if len(stats) == 4 and all(stat in (3, 4) for stat in stats):
+                        break
+                    if any((v[2] or 0) > 0 for v in states.values()):
+                        emit("A job has failed tasks: check its task report in the Monitor.")
+                        break
+                time.sleep(10)
+
+            os.makedirs(results_dir, exist_ok=True)
+            out_dir = os.path.join(root, "out")
+            files = [os.path.join(out_dir, name) for name in sorted(os.listdir(out_dir))] if os.path.isdir(out_dir) else []
+            for sub in ("P_off", "P_on"):
+                proxy_dir = os.path.join(root, "proxies", sub)
+                if os.path.isdir(proxy_dir):
+                    files += [os.path.join(proxy_dir, name) for name in sorted(os.listdir(proxy_dir))[:1]]
+            for path in [out] + files:
+                shutil.copy2(path, results_dir)
+            emit("Copied %d files to %s" % (len(files) + 1, results_dir))
             return True
 
         self._start(work)
