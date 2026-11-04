@@ -1,6 +1,11 @@
 // Error logging helper
 function logError(msg) {
     try {
+        if ($.global.TS_JSX_WARNINGS) {
+            $.global.TS_JSX_WARNINGS.push(String(msg));
+        }
+    } catch (e) {}
+    try {
         var logFile;
         if (app.project && app.project.file && app.project.file.parent) {
             logFile = new File(app.project.file.parent.fsName + "/ae_manifest_error.log");
@@ -14,6 +19,18 @@ function logError(msg) {
     } catch (e) {
         // If logging fails, there's not much we can do, but we don't want to throw an error from the logger itself
     }
+}
+
+// Comp identifiers passed in by the Python app (see python/app/afterfx.py). When the
+// script is run through the bootstrap, $.global.TS_JSX_ARGS = {comps: [...]} and the
+// _comp_identifiers.json lookup is skipped. Returns null when run on its own.
+function getPassedCompIdentifiers() {
+    try {
+        if ($.global.TS_JSX_ARGS && $.global.TS_JSX_ARGS.comps) {
+            return $.global.TS_JSX_ARGS.comps;
+        }
+    } catch (e) {}
+    return null;
 }
 
 // Safe file writing helper
@@ -59,6 +76,15 @@ try {
 
 function getCompOutputLocationsFromJson() {
     var compOutputMap = {};
+    var passed = getPassedCompIdentifiers();
+    if (passed) {
+        for (var p = 0; p < passed.length; p++) {
+            if (passed[p].name && passed[p].output_location) {
+                compOutputMap[passed[p].name] = passed[p].output_location;
+            }
+        }
+        return compOutputMap;
+    }
     var projectFile = app.project.file;
     if (!projectFile) {
         var msg = "Project file is not saved. Please save your project before running this script.";
@@ -263,6 +289,10 @@ function writeProjectManifestFile(sceneFilePath, compManifests, outputFolderPath
 }
 
 function getProjectManifestOutputFolder() {
+    var passed = getPassedCompIdentifiers();
+    if (passed && passed.length && passed[0].output_location) {
+        return passed[0].output_location;
+    }
     var projectFile = app.project.file;
     if (!projectFile) return null;
     var projectFolder = projectFile.parent;

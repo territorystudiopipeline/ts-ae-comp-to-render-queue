@@ -17,15 +17,246 @@ import sgtk
 logger = sgtk.platform.get_logger(__name__)
 
 
+def _enum_value(value):
+    """An int for a Qt enum value or plain int, on PySide2 and PySide6."""
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except TypeError:
+        return int(value.value)
+
+
+class CenteredCheckBoxDelegate(QtGui.QStyledItemDelegate):
+    """
+        Draws an item's check box in the centre of the cell and toggles it when the box is
+        clicked (or with Space). The item stays a normal checkable QTableWidgetItem, so
+        itemChanged, checkState() and the stylesheet's QTableView::indicator rules still apply.
+
+        Usage:
+            table.setItemDelegateForColumn(column, CenteredCheckBoxDelegate(table))
+    """
+
+    def _style(self, option):
+        widget = option.widget
+        return widget.style() if widget is not None else QtGui.QApplication.style()
+
+    def check_rect(self, option, index):
+        """
+            The rectangle of the check box, centred in the cell.
+        """
+        return self.box_rect(option.rect, option.widget, index)
+
+    def box_rect(self, cell_rect, widget, index):
+        """
+            The check box rectangle for a cell rectangle (usable without a style option).
+        """
+        opt = QtGui.QStyleOptionViewItem()
+        self.initStyleOption(opt, index)
+        opt.rect = cell_rect
+        opt.features |= QtGui.QStyleOptionViewItem.HasCheckIndicator
+        style = widget.style() if widget is not None else QtGui.QApplication.style()
+        indicator = style.subElementRect(QtGui.QStyle.SE_ItemViewItemCheckIndicator, opt, widget)
+        rect = QtCore.QRect(0, 0, indicator.width(), indicator.height())
+        rect.moveCenter(cell_rect.center())
+        return rect
+
+    @staticmethod
+    def toggle(model, index):
+        """
+            Flip an item's check state. Returns True if it changed.
+        """
+        flags = index.flags()
+        if not (flags & QtCore.Qt.ItemIsUserCheckable) or not (flags & QtCore.Qt.ItemIsEnabled):
+            return False
+        checked = _enum_value(index.data(QtCore.Qt.CheckStateRole)) == _enum_value(QtCore.Qt.Checked)
+        return model.setData(index, QtCore.Qt.Unchecked if checked else QtCore.Qt.Checked, QtCore.Qt.CheckStateRole)
+
+    def paint(self, painter, option, index):
+        style = self._style(option)
+
+        # Background, selection and hover, without the default (left-aligned) check box
+        background = QtGui.QStyleOptionViewItem(option)
+        self.initStyleOption(background, index)
+        background.features &= ~QtGui.QStyleOptionViewItem.HasCheckIndicator
+        background.text = ""
+        background.icon = QtGui.QIcon()
+        style.drawControl(QtGui.QStyle.CE_ItemViewItem, background, painter, option.widget)
+
+        if index.data(QtCore.Qt.CheckStateRole) is None:
+            return
+
+        check = QtGui.QStyleOptionViewItem(option)
+        self.initStyleOption(check, index)
+        check.rect = self.check_rect(option, index)
+        check.state &= ~(QtGui.QStyle.State_On | QtGui.QStyle.State_Off | QtGui.QStyle.State_NoChange)
+        state = _enum_value(index.data(QtCore.Qt.CheckStateRole))
+        if state == _enum_value(QtCore.Qt.Checked):
+            check.state |= QtGui.QStyle.State_On
+        elif state == _enum_value(QtCore.Qt.PartiallyChecked):
+            check.state |= QtGui.QStyle.State_NoChange
+        else:
+            check.state |= QtGui.QStyle.State_Off
+        style.drawPrimitive(QtGui.QStyle.PE_IndicatorItemViewItemCheck, check, painter, option.widget)
+
+    def editorEvent(self, event, model, option, index):
+        flags = index.flags()
+        if not (flags & QtCore.Qt.ItemIsUserCheckable) or not (flags & QtCore.Qt.ItemIsEnabled):
+            return False
+
+        event_type = event.type()
+        mouse_events = (QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
+                        QtCore.QEvent.MouseButtonDblClick)
+        if event_type in mouse_events:
+            if event.button() != QtCore.Qt.LeftButton:
+                return False
+            position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            if not self.check_rect(option, index).contains(position):
+                return False
+            if event_type != QtCore.QEvent.MouseButtonRelease:
+                # Like Qt's own delegate: swallow press/double-click on the box, so clicking
+                # a box keeps the row selection (multi-row edits rely on it). Toggle on release.
+                return True
+        elif event_type == QtCore.QEvent.KeyPress:
+            if event.key() not in (QtCore.Qt.Key_Space, QtCore.Qt.Key_Select):
+                return False
+        else:
+            return False
+
+        return self.toggle(model, index)
+
+
+class ElidedLabel(QtGui.QLabel):
+    """
+        A one-line label that shortens its text with "..." instead of claiming width, so
+        neighbouring widgets (the header summary tags) keep their space.
+    """
+
+    def __init__(self, text="", parent=None):
+        super(ElidedLabel, self).__init__(text, parent)
+        self._full_text = text
+        self.setSizePolicy(QtGui.QSizePolicy.Ignored, QtGui.QSizePolicy.Preferred)
+        self.setMinimumWidth(40)
+
+    def setText(self, text):
+        self._full_text = text or ""
+        self._update_elided()
+
+    def text(self):
+        return self._full_text
+
+    def resizeEvent(self, event):
+        super(ElidedLabel, self).resizeEvent(event)
+        self._update_elided()
+
+    def _update_elided(self):
+        elided = self.fontMetrics().elidedText(self._full_text, QtCore.Qt.ElideRight, max(0, self.width()))
+        super(ElidedLabel, self).setText(elided)
+
+
 class DraggableTableWidget(QtGui.QTableWidget):
     def __init__(self, parent=None):
         super(DraggableTableWidget, self).__init__(parent)
 
         self.setSelectionBehavior(QtGui.QTableWidget.SelectRows)
-        self.setSelectionMode(QtGui.QTableWidget.MultiSelection)
+        # Click / Ctrl+click / Shift+click, like every other table
+        self.setSelectionMode(QtGui.QTableWidget.ExtendedSelection)
+
+        # Locked while background work runs (see set_locked)
+        self._locked = False
+        self.viewport().installEventFilter(self)
+
+    def selectionCommand(self, index, event=None):
+        """
+            Don't let focus moving into a cell widget change the selection.
+
+            Qt treats cell widgets (the drop-downs and frame range fields) as persistent
+            editors: when one gets focus (a click, or just the mouse wheel over a drop-down) the
+            view makes its cell current, and with row selection that replaced the selection with
+            that one row. Focus-driven changes have no event; clicks and keys on the table
+            itself still select as normal.
+        """
+        if event is None:
+            focus_widget = QtGui.QApplication.focusWidget()
+            if (focus_widget is not None and focus_widget is not self
+                    and self.viewport().isAncestorOf(focus_widget)):
+                return QtCore.QItemSelectionModel.NoUpdate
+        return super(DraggableTableWidget, self).selectionCommand(index, event)
+
+    # Cell widgets with this property stay enabled when the table is locked (e.g. status tags,
+    # whose colours would otherwise be greyed out)
+    KEEP_ENABLED_PROPERTY = "keepEnabledWhenLocked"
+
+    def set_locked(self, locked):
+        """
+            Lock the table while work runs in the background: no clicks, keys, edits or context
+            menu, and the editable cell widgets are disabled. Unlike setEnabled(False), widgets
+            marked with KEEP_ENABLED_PROPERTY (status) keep their colours, and scrolling still works.
+        """
+        self._locked = bool(locked)
+        for row in range(self.rowCount()):
+            for column in range(self.columnCount()):
+                widget = self.cellWidget(row, column)
+                if widget is not None and not widget.property(self.KEEP_ENABLED_PROPERTY):
+                    widget.setEnabled(not self._locked)
+        self.viewport().update()
+
+    def is_locked(self):
+        return self._locked
+
+    def eventFilter(self, obj, event):
+        if self._locked and obj is self.viewport() and event.type() in (
+                QtCore.QEvent.MouseButtonPress, QtCore.QEvent.MouseButtonRelease,
+                QtCore.QEvent.MouseButtonDblClick, QtCore.QEvent.ContextMenu):
+            return True
+        return super(DraggableTableWidget, self).eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        if self._locked:
+            event.ignore()
+            return
+        if event.key() == QtCore.Qt.Key_Escape and self.selectionModel().hasSelection():
+            self.clearSelection()
+            event.accept()
+            return
+        super(DraggableTableWidget, self).keyPressEvent(event)
+
+    def _check_box_at(self, event):
+        """
+            The index whose centred check box is under the mouse, or None.
+        """
+        position = event.position().toPoint() if hasattr(event, "position") else event.pos()
+        index = self.indexAt(position)
+        if not index.isValid():
+            return None
+        delegate = self.itemDelegateForColumn(index.column())
+        if not isinstance(delegate, CenteredCheckBoxDelegate):
+            return None
+        if delegate.box_rect(self.visualRect(index), self, index).contains(position):
+            return index
+        return None
+
+    def mousePressEvent(self, event):
+        # A click on a check box only toggles it: the row selection stays as it is, so the
+        # change can be applied to all selected rows.
+        if event.button() == QtCore.Qt.LeftButton and self._check_box_at(event) is not None:
+            event.accept()
+            return
+        super(DraggableTableWidget, self).mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        index = self._check_box_at(event) if event.button() == QtCore.Qt.LeftButton else None
+        if index is not None:
+            CenteredCheckBoxDelegate.toggle(self.model(), index)
+            event.accept()
+            return
+        super(DraggableTableWidget, self).mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        idx = self.indexAt(event.pos())
+        if event.button() == QtCore.Qt.LeftButton and self._check_box_at(event) is not None:
+            event.accept()  # the second click's release toggles again, like a QCheckBox
+            return
+        idx = self.indexAt(event.position().toPoint() if hasattr(event, "position") else event.pos())
         if not idx.isValid():
             self.clearSelection()
             event.accept()
@@ -41,14 +272,23 @@ class CollapsiblePanel(QtGui.QWidget):
     def __init__(self, title="Panel", layout=QtGui.QVBoxLayout):
         super().__init__()
         self.main_layout = QtGui.QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(6)
         self.toggle_button = QtGui.QPushButton(f"▼ {title}")
         self.toggle_button.clicked.connect(self.toggle_panel)
+
+        # Header row: toggle button, then optional summary widgets (add_header_widget)
+        self.header_layout = QtGui.QHBoxLayout()
+        self.header_layout.setContentsMargins(0, 0, 0, 0)
+        self.header_layout.setSpacing(8)
+        self.header_layout.addWidget(self.toggle_button)
+        self.header_layout.addStretch()
 
         self.content_frame = QtGui.QFrame()
         self.content_frame.setLayout(layout())
         self.content_frame.setVisible(True)
 
-        self.main_layout.addWidget(self.toggle_button)
+        self.main_layout.addLayout(self.header_layout)
         self.main_layout.addWidget(self.content_frame)
 
         # Collapse the panel by default
@@ -64,6 +304,13 @@ class CollapsiblePanel(QtGui.QWidget):
         self.toggle_animation.setDuration(100)
         self._collapsed_height = 0
         self._expanded_height = 0  # Will be set on first expand
+        self._collapsing = False
+        self.toggle_animation.finished.connect(self._on_animation_finished)
+
+    def _on_animation_finished(self):
+        # Hide the content once a collapse has finished animating
+        if self._collapsing:
+            self.content_frame.setVisible(False)
 
     def toggle_panel(self):
 
@@ -80,31 +327,26 @@ class CollapsiblePanel(QtGui.QWidget):
         end_height = self._collapsed_height if is_visible else self._expanded_height
 
         self.toggle_animation.stop()
+        self._collapsing = is_visible
         self.toggle_animation.setStartValue(start_height)
         self.toggle_animation.setEndValue(end_height)
         self.content_frame.setVisible(True)
         self.toggle_animation.start()
 
         self.toggle_button.setText(f"{'▼' if not is_visible else '▶'} {self.toggle_button.text()[2:]}")
-        self.toggle_button.setStyleSheet(
-            "background-color: #444; " if is_visible else "background-color: #222;"
-        )
 
-        if is_visible:
-            # Hide after animation
-            self.toggle_animation.finished.connect(lambda: self.content_frame.setVisible(False))
-        else:
-            # Disconnect any previous connections to avoid multiple calls
-            try:
-                self.toggle_animation.finished.disconnect()
-            except Exception:
-                pass
+        # Collapsing hides the content when the animation finishes (_on_animation_finished)
+        self._collapsing = is_visible
 
         # Remove focus from the button
         self.toggle_button.clearFocus()
 
     def add_widget(self, widget):
         self.content_frame.layout().addWidget(widget)
+
+    def add_header_widget(self, widget):
+        """Add a widget next to the toggle button (shown collapsed or expanded)."""
+        self.header_layout.insertWidget(self.header_layout.count() - 1, widget)
 
     def add_layout(self, layout):
         self.content_frame.layout().addLayout(layout)
@@ -305,17 +547,17 @@ class ItemSelectionDialog(QtGui.QDialog):
         self.setLayout(QtGui.QVBoxLayout())
 
         # List Layout
-        self.list_layout = QtGui.QHBoxLayout(self)
+        self.list_layout = QtGui.QHBoxLayout()
         self.list_layout.setObjectName("list_layout")
         self.list_layout.setContentsMargins(10, 10, 10, 10)
         self.list_layout.setSpacing(5)
 
         # selected List Layout
-        self.selected_list_layout = QtGui.QVBoxLayout(self)
+        self.selected_list_layout = QtGui.QVBoxLayout()
         self.selected_list_layout.setObjectName("selected_list_layout")
 
         # Available List Layout
-        self.available_list_layout = QtGui.QVBoxLayout(self)
+        self.available_list_layout = QtGui.QVBoxLayout()
         self.available_list_layout.setObjectName("available_list_layout")
 
         # Machine List
@@ -334,7 +576,7 @@ class ItemSelectionDialog(QtGui.QDialog):
         self.selected_list_layout.addWidget(self.selected_list)
 
         # Buttons
-        self.button_layout = QtGui.QVBoxLayout(self)
+        self.button_layout = QtGui.QVBoxLayout()
 
         self.add_button = QtGui.QPushButton(">", self)
         self.add_button.setToolTip("Add selected items to the selected list")
@@ -370,7 +612,7 @@ class ItemSelectionDialog(QtGui.QDialog):
         self.list_layout.addLayout(self.selected_list_layout)
 
         # Accept and Cancel Buttons
-        self.button_layout_2 = QtGui.QHBoxLayout(self)
+        self.button_layout_2 = QtGui.QHBoxLayout()
         self.button_layout_2.setObjectName("button_layout_2")
         self.accept_button = QtGui.QPushButton("Accept", self)
         self.cancel_button = QtGui.QPushButton("Cancel", self)
@@ -648,18 +890,33 @@ class Ui_Dialog(object):
         # Set column resize mode
         header = self.compTableWidget.horizontalHeader()
         header.setSectionResizeMode(0, QtGui.QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QtGui.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(2, QtGui.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QtGui.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(4, QtGui.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(5, QtGui.QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QtGui.QHeaderView.ResizeToContents)
+        for column in range(1, len(self.compTableHeaders)):
+            header.setSectionResizeMode(column, QtGui.QHeaderView.Interactive)
+        # Whole-row selection would otherwise highlight every header section
+        header.setHighlightSections(False)
 
-        # Set Initial column width
-        self.compTableWidget.setColumnWidth(1, 200)
+        # Initial column widths (the user's widths are restored from QSettings)
+        for column, width in ((1, 260), (2, 120), (3, 215), (4, 200), (5, 120), (6, 80)):
+            self.compTableWidget.setColumnWidth(column, width)
 
-        # Set column width
-        self.compTableWidget.setColumnWidth(0, 200)
+        # Use Comp Name / Include: check boxes centred in their cells
+        self.checkBoxDelegate = CenteredCheckBoxDelegate(self.compTableWidget)
+        for column in (5, 6):
+            self.compTableWidget.setItemDelegateForColumn(column, self.checkBoxDelegate)
+
+        self.compTableWidget.verticalHeader().setVisible(False)
+        self.compTableWidget.verticalHeader().setDefaultSectionSize(36)
+        self.compTableWidget.setAlternatingRowColors(True)
+        self.compTableWidget.setShowGrid(False)
+
+        # Empty state, shown over the table while it has no rows
+        self.emptyStateLabel = QtGui.QLabel(
+            "No comps in the render queue.\n\nSelect comps in the Project panel, then click Add Selected Comps.",
+            self.compTableWidget.viewport())
+        self.emptyStateLabel.setObjectName("emptyStateLabel")
+        self.emptyStateLabel.setAlignment(QtCore.Qt.AlignCenter)
+        self.emptyStateLabel.setAttribute(QtCore.Qt.WA_TransparentForMouseEvents)
+        self.emptyStateLabel.hide()
 
         # Progress Bar
         self.progressBar = QtGui.QProgressBar(Dialog)
@@ -671,27 +928,8 @@ class Ui_Dialog(object):
         self.progressBar.setFormat("%p%")
         self.progressBar.setOrientation(QtCore.Qt.Horizontal)
         self.progressBar.setAlignment(QtCore.Qt.AlignCenter)
-        self.progressBar.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
-        self.progressBar.setMinimumHeight(30)
-        self.progressBar.setMaximumHeight(30)
-        self.progressBar.setMinimumWidth(300)
+        self.progressBar.setFixedHeight(22)
         self.progressBar.hide()
-
-        # Secondary Progress Bar
-        self.secondaryProgressBar = QtGui.QProgressBar(Dialog)
-        self.secondaryProgressBar.setObjectName("secondaryProgressBar")
-        self.secondaryProgressBar.setValue(0)
-        self.secondaryProgressBar.setMaximum(100)
-        self.secondaryProgressBar.setMinimum(0)
-        self.secondaryProgressBar.setTextVisible(True)
-        self.secondaryProgressBar.setFormat("%p%")
-        self.secondaryProgressBar.setOrientation(QtCore.Qt.Horizontal)
-        self.secondaryProgressBar.setAlignment(QtCore.Qt.AlignCenter)
-        self.secondaryProgressBar.setSizePolicy(QtGui.QSizePolicy.Expanding, QtGui.QSizePolicy.Expanding)
-        self.secondaryProgressBar.setMinimumHeight(20)
-        self.secondaryProgressBar.setMaximumHeight(20)
-        self.secondaryProgressBar.setMinimumWidth(300)
-        self.secondaryProgressBar.hide()
 
         # Create Actions
         self.jumpToCompAction = QtGui.QAction("Jump to Comp", self.compTableWidget)
@@ -699,15 +937,24 @@ class Ui_Dialog(object):
         self.removeSelectedCompsAction = QtGui.QAction("Remove Selected Comps", self.compTableWidget)
         self.matchSelectedCompsAction = QtGui.QAction("Match Selected Comps", self.compTableWidget)
         self.refreshAction = QtGui.QAction("Refresh", self.compTableWidget)
+        self.openOutputFolderAction = QtGui.QAction("Open Output Folder", self.compTableWidget)
+        self.requeueAction = QtGui.QAction("Re-queue", self.compTableWidget)
+        self.requeueAction.setToolTip("Add a copy of the finished item to the render queue, ready to render again")
+        self.copyJobIdAction = QtGui.QAction("Copy Deadline Job ID", self.compTableWidget)
 
         # Context Menu
-        self.contextMenu = QtGui.QMenu()
+        # Parented to the table so the popup has an owner (an unparented QMenu is a
+        # free-floating top-level window nobody owns).
+        self.contextMenu = QtGui.QMenu(self.compTableWidget)
         self.contextMenu.setObjectName("contextMenu")
         self.contextMenu.addAction(self.matchSelectedCompsAction)
         self.contextMenu.addAction(self.removeSelectedCompsAction)
         self.contextMenu.addSeparator()
         self.contextMenu.addAction(self.jumpToCompAction)
         self.contextMenu.addAction(self.removeCompAction)
+        self.contextMenu.addAction(self.openOutputFolderAction)
+        self.contextMenu.addAction(self.requeueAction)
+        self.contextMenu.addAction(self.copyJobIdAction)
         self.contextMenu.addSeparator()
         self.contextMenu.addAction(self.refreshAction)
 
@@ -716,8 +963,71 @@ class Ui_Dialog(object):
         self.compTableWidget.setContextMenuPolicy(QtCore.Qt.CustomContextMenu)
         self.compTableWidget.customContextMenuRequested.connect(self.showContextMenu)
 
+        # Header: heading, scene line and status summary tags
+        self.headerLayout = QtGui.QHBoxLayout()
+        self.headerLayout.setSpacing(8)
+        self.titleLayout = QtGui.QVBoxLayout()
+        self.titleLayout.setSpacing(0)
+        self.titleLabel = QtGui.QLabel("Render Queue")
+        self.titleLabel.setProperty("heading", True)
+        self.sceneLabel = ElidedLabel("")
+        self.sceneLabel.setObjectName("sceneLabel")
+        self.titleLayout.addWidget(self.titleLabel)
+        self.titleLayout.addWidget(self.sceneLabel)
+        # The title block takes the spare width (its scene line elides); the tags keep theirs
+        self.headerLayout.addLayout(self.titleLayout, 1)
+        # Summary tags are added here by the app (AppDialog.refresh_summary)
+        self.summaryLayout = QtGui.QHBoxLayout()
+        self.summaryLayout.setSpacing(6)
+        self.headerLayout.addLayout(self.summaryLayout)
+        self.mainLayout.addLayout(self.headerLayout)
+
+        # Toolbar (replaces the icon-only side panel)
+        self.toolbarLayout = QtGui.QHBoxLayout()
+        self.toolbarLayout.setSpacing(6)
+
+        self.addButton = QtGui.QPushButton("Add Selected Comps", Dialog)
+        self.addButton.setObjectName("addButton")
+        self.addButton.setIcon(self.addIcon)
+        self.addButton.setToolTip("Add the comps selected in the Project panel to the render queue")
+
+        self.refreshButton = QtGui.QPushButton("Refresh", Dialog)
+        self.refreshButton.setObjectName("refreshButton")
+        self.refreshButton.setIcon(self.refreshIcon)
+        self.refreshButton.setToolTip("Reload the table from the After Effects render queue")
+
+        self.clearButton = QtGui.QPushButton("Clear Finished", Dialog)
+        self.clearButton.setObjectName("clearButton")
+        self.clearButton.setIcon(self.clearQueueIcon)
+        self.clearButton.setToolTip("Remove finished and stopped items from the After Effects render queue")
+
+        # Finished render queue items are listed but hidden unless this is ticked
+        self.showFinishedCheckBox = QtGui.QCheckBox("Show finished", Dialog)
+        self.showFinishedCheckBox.setObjectName("showFinishedCheckBox")
+        self.showFinishedCheckBox.setToolTip("Show render queue items that have already rendered, stopped or failed")
+
+        self.hintLabel = QtGui.QLabel("Select rows, then change a value to apply it to all of them")
+        self.hintLabel.setObjectName("hintLabel")
+        # Gives way first when the window is narrow
+        self.hintLabel.setSizePolicy(QtGui.QSizePolicy.Ignored, QtGui.QSizePolicy.Preferred)
+        self.hintLabel.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        self.applyButton = QtGui.QPushButton("Apply to Queue", Dialog)
+        self.applyButton.setObjectName("applyButton")
+        self.applyButton.setIcon(self.applyIcon)
+        self.applyButton.setToolTip("Apply templates, frame ranges and output paths to the AE render queue "
+                                    "without rendering (Render and Submit do this for you)")
+
+        for button in (self.addButton, self.refreshButton, self.clearButton):
+            self.toolbarLayout.addWidget(button)
+        self.toolbarLayout.addSpacing(6)
+        self.toolbarLayout.addWidget(self.showFinishedCheckBox)
+        self.toolbarLayout.addWidget(self.hintLabel, 1)
+        self.toolbarLayout.addWidget(self.applyButton)
+        self.mainLayout.addLayout(self.toolbarLayout)
+
         # Add Table to Layout
-        self.mainLayout.addWidget(self.compTableWidget)
+        self.mainLayout.addWidget(self.compTableWidget, 1)
 
         # Collapsible Panel
         self.deadlinePanel = CollapsiblePanel("Deadline Settings", QtGui.QVBoxLayout)
@@ -776,7 +1086,7 @@ class Ui_Dialog(object):
         self.deadline_frame_list.setPlaceholderText("1001 - 1100")
         self.deadline_frame_list.setToolTip("Frame List")
         self.deadline_frame_list.setValidator(
-            QtGui.QRegExpValidator(QtCore.QRegExp("[0-9]+ - [0-9]+"), self.deadline_frame_list))
+            QtGui.QRegularExpressionValidator(QtCore.QRegularExpression("[0-9]+ - [0-9]+"), self.deadline_frame_list))
         self.deadline_frame_list.setMaxLength(20)
 
         # Connect the checkbox to enable/disable the frame list line edit
@@ -854,7 +1164,7 @@ class Ui_Dialog(object):
         self.deadline_comment = QtGui.QLineEdit()
         self.deadline_comment.setObjectName("comment")
         self.deadline_comment.setToolTip("Comment")
-        self.deadline_comment.setValidator(QtGui.QRegExpValidator(QtCore.QRegExp("[^<>*|\"?\\/:]+"), self.deadline_comment))
+        self.deadline_comment.setValidator(QtGui.QRegularExpressionValidator(QtCore.QRegularExpression("[^<>*|\"?\\/:]+"), self.deadline_comment))
 
         # Machine List
         self.deadline_machine_list = LineEditButton()
@@ -1179,109 +1489,47 @@ class Ui_Dialog(object):
         self.deadlineOtherOptionsLayout1.addWidget(self.deadlineOutputFileChecking)
         self.deadlineOtherOptionsLayout1.addWidget(self.deadlineMemoryManagementFrame)
 
-        # Add Progress Bar
+        # Progress bar (shown while working)
         self.mainLayout.addWidget(self.progressBar)
 
-        # Add Secondary Progress Bar
-        self.mainLayout.addWidget(self.secondaryProgressBar)
-
-        # Buttons
+        # Footer buttons: Close, Render Locally, Submit to Deadline (primary)
         self.buttonsLayout = QtGui.QHBoxLayout()
         self.buttonsLayout.setObjectName("buttonsLayout")
+        self.buttonsLayout.setSpacing(8)
 
-        # Side Quick Actions Menu Layout
-        self.sideMenuLayout = QtGui.QVBoxLayout()
-        self.sideMenuLayout.setObjectName("sideMenuLayout")
-
-        self.sideMenuFrame = QtGui.QGroupBox()
-        self.sideMenuFrame.setObjectName("sideMenuFrame")
-        self.sideMenuFrame.setTitle("Actions")
-        self.sideMenuFrame.setAlignment(QtCore.Qt.AlignHCenter)
-        self.sideMenuFrame.setLayout(self.sideMenuLayout)
-        self.sideMenuFrame.layout().setContentsMargins(3, 10, 3, 10)
-        self.sideMenuFrame.layout().setSpacing(5)
-        self.sideMenuFrame.setMaximumWidth(65)
-
-        # Submit to Deadline
-        self.submitButton = QtGui.QPushButton(Dialog)
-        self.submitButton.setObjectName("submitButton")
-        self.submitButton.setText("Submit to Deadline")
-        self.submitButton.setMinimumHeight(30)
-        self.submitButton.setStyleSheet("background-color: SteelBlue; color: white;")
-
-        # Add Selected To Queue
-        self.addButton = QtGui.QPushButton(Dialog)
-        self.addButton.setObjectName("addButton")
-        self.addButton.setIcon(self.addIcon)
-        self.addButton.setIconSize(QtCore.QSize(30, 30))
-        self.addButton.setToolTip("Add Selected Comps To Render Queue")
-        self.addButton.setMinimumHeight(40)
-        self.addButton.setMaximumHeight(40)
-        self.addButton.setMinimumWidth(40)
-        self.addButton.setMaximumWidth(40)
-
-        # Apply To Render Queue
-        self.applyButton = QtGui.QPushButton(Dialog)
-        self.applyButton.setObjectName("applyButton")
-        self.applyButton.setIcon(self.applyIcon)
-        self.applyButton.setIconSize(QtCore.QSize(30, 30))
-        self.applyButton.setToolTip("Apply Changes To Render Queue")
-        self.applyButton.setMinimumHeight(40)
-        self.applyButton.setMaximumHeight(40)
-        self.applyButton.setMinimumWidth(40)
-        self.applyButton.setMaximumWidth(40)
-
-        # Refresh Queue
-        self.refreshButton = QtGui.QPushButton(Dialog)
-        self.refreshButton.setObjectName("refreshButton")
-        self.refreshButton.setToolTip("Refresh Render Queue")
-        self.refreshButton.setIcon(self.refreshIcon)
-        self.refreshButton.setIconSize(QtCore.QSize(30, 30))
-        self.refreshButton.setMinimumHeight(40)
-        self.refreshButton.setMaximumHeight(40)
-        self.refreshButton.setMinimumWidth(40)
-        self.refreshButton.setMaximumWidth(40)
-
-        # Clear Queue
-        self.clearButton = QtGui.QPushButton(Dialog)
-        self.clearButton.setObjectName("clearButton")
-        self.clearButton.setIcon(self.clearQueueIcon)
-        self.clearButton.setToolTip("Clear Render Queue History")
-        self.clearButton.setIconSize(QtCore.QSize(30, 30))
-        self.clearButton.setMinimumHeight(40)
-        self.clearButton.setMaximumHeight(40)
-        self.clearButton.setMinimumWidth(40)
-        self.clearButton.setMaximumWidth(40)
-
-        # Render Queue
-        self.renderButton = QtGui.QPushButton(Dialog)
-        self.renderButton.setObjectName("renderButton")
-        self.renderButton.setText("Render")
-        self.renderButton.setMinimumHeight(30)
-
-        # Cancel
-        self.cancelButton = QtGui.QPushButton(Dialog)
+        self.cancelButton = QtGui.QPushButton("Close", Dialog)
         self.cancelButton.setObjectName("cancelButton")
-        self.cancelButton.setText("Cancel")
-        self.cancelButton.setMinimumHeight(30)
 
+        self.renderButton = QtGui.QPushButton("Render Locally", Dialog)
+        self.renderButton.setObjectName("renderButton")
+        self.renderButton.setToolTip("Apply to the queue, save a render scene and render in this After Effects")
+
+        self.submitButton = QtGui.QPushButton("Submit to Deadline", Dialog)
+        self.submitButton.setObjectName("submitButton")
+        self.submitButton.setToolTip("Apply to the queue, save a render scene per comp and submit to Deadline")
+        self.submitButton.setProperty("primary", True)
+        self.submitButton.setMinimumWidth(160)
+        self.submitButton.setDefault(True)
+
+        self.buttonsLayout.addStretch()
+        self.buttonsLayout.addWidget(self.cancelButton)
         self.buttonsLayout.addWidget(self.renderButton)
         self.buttonsLayout.addWidget(self.submitButton)
-        self.buttonsLayout.addWidget(self.cancelButton)
-
-        self.sideMenuLayout.addWidget(self.addButton, alignment=QtCore.Qt.AlignHCenter)
-        self.sideMenuLayout.addWidget(self.applyButton, alignment=QtCore.Qt.AlignHCenter)
-        self.sideMenuLayout.addWidget(self.refreshButton, alignment=QtCore.Qt.AlignHCenter)
-        self.sideMenuLayout.addWidget(self.clearButton, alignment=QtCore.Qt.AlignHCenter)
-        self.sideMenuLayout.addStretch()
-
         self.mainLayout.addLayout(self.buttonsLayout)
 
+        self.mainLayout.setContentsMargins(4, 4, 4, 4)
+        self.mainLayout.setSpacing(10)
         self.horizontalLayout.addLayout(self.mainLayout)
-        self.horizontalLayout.addWidget(self.sideMenuFrame)
 
         self.retranslateUi(Dialog)
         QtCore.QMetaObject.connectSlotsByName(Dialog)
+
+    def set_scene_text(self, text):
+        """
+            The scene line under the title (elided with "..." when the header is narrow).
+        """
+        self.sceneLabel.setText(text)
+        self.sceneLabel.setToolTip(text)
 
     def showContextMenu(self, pos):
         """
@@ -1290,11 +1538,17 @@ class Ui_Dialog(object):
             Args:
                 pos (QPoint): The position of the right click
         """
-        self.contextMenu.exec_(self.compTableWidget.mapToGlobal(pos))
+        # Remember which row was clicked: the actions run after the menu closes, when the
+        # cursor is over the menu item rather than the row.
+        self.contextMenuRow = self.compTableWidget.rowAt(pos.y())
+        try:
+            self.contextMenu.exec_(self.compTableWidget.viewport().mapToGlobal(pos))
+        finally:
+            self.contextMenuRow = -1
 
     def retranslateUi(self, Dialog):
         _translate = QtCore.QCoreApplication.translate
         Dialog.setWindowTitle(_translate("Dialog", "Add Selected Comps to Render Queue"))
         #self.addButton.setText(_translate("Dialog", "Add To Queue"))
-        self.cancelButton.setText(_translate("Dialog", "Cancel"))
+        self.cancelButton.setText(_translate("Dialog", "Close"))
 from . import resources_rc
