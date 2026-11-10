@@ -1,3 +1,70 @@
+# ts-ae-comp-to-render-queue
+
+Adds the selected After Effects comps to the render queue, applies the studio output
+templates, and renders locally or submits to Deadline 10 (through DeadlineConnect).
+
+## Optional settings
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `afterfx_path` | empty | `AfterFX.com` used to run the manifest scripts. Empty finds it from the running After Effects version. |
+| `afterfx_timeout` | 0 | Seconds to wait for each After Effects script run (0 means the default, 300). |
+
+## Look (ts_qt_utils)
+
+The window uses the studio `ts_qt_utils` package: `StyleLoader` (dark theme) plus
+`python/app/ui/app_overrides.qss`, and `InfoTag` for the per-row status and the header summary.
+
+- `ts_qt_utils` (and its `QtPy` dependency) must be in the After Effects rez resolve
+  (`ts_aftereffects`), the same way `scene_fx_manager` is.
+- QtPy is pointed at Toolkit's Qt binding (`QT_API`). If ts_qt_utils is missing, or QtPy resolves
+  to a different binding than Toolkit (mixing bindings crashes Qt), the app logs a warning and
+  falls back to plain status labels and the default Toolkit look.
+
+## Table and local renders
+
+- The table lists every render queue item, in queue order. Queued, needs-output and unqueued
+  items are editable (Include mirrors the item's render flag). Done, stopped and failed items are
+  read-only rows showing their output path, hidden unless **Show finished** is ticked.
+  Rows that finish while the window is open stay visible.
+- Right-click a finished row to **Re-queue** it (After Effects duplicates it as a queued copy)
+  or **Open Output Folder**.
+- **Render Locally** follows the render live (`python/app/render_monitor.py`): Waiting, then
+  Rendering with frame progress for image sequences, then Done / Failed / Stopped with the time
+  taken. The window is locked until the render ends; closing it just stops following (After
+  Effects keeps rendering). Opening or refreshing the window during a render follows it too.
+- Frame progress counts frames written since the render started (new files, or files whose
+  modification time changed), listed on a worker thread. Movies show Rendering, then Done.
+
+## Deadline jobs
+
+- After a successful submission each item is unqueued in the render queue (so Render Locally or
+  Submit don't send it again) and its **Comment** gets `[Deadline <job id> <state>]`; any other
+  comment text is kept. There's no extra save: the tag is stored at the next normal save (After
+  Effects asks before closing a modified project).
+- Tagged items are read-only farm rows. While the window is open, `python/app/deadline_monitor.py`
+  asks the Deadline Web Service about all unfinished jobs in one request every 20s, on a worker
+  thread: Queued, On farm (tasks done / total, spinner), Suspended, Failed, Done, or Not found
+  (job deleted). The tag's state is updated when it changes.
+- Reopening the window rebuilds the farm rows from the comments (last known state straight away)
+  and catches up in one request. Completed jobs are finished rows, hidden unless Show finished is
+  ticked; **Clear Finished** removes them from the render queue too (failed ones stay).
+- Right-click a farm row: **Re-queue** clears the tag and queues the item again; **Copy Deadline
+  Job ID**. Ticking an item again by hand in After Effects makes it a normal editable row.
+
+## Notes for developers
+
+- Anything that uses `engine.adobe` (the After Effects RPC bridge) or a Qt widget runs on the
+  GUI thread. Worker threads only copy files, run `AfterFX.com` and talk to Deadline, and they
+  log through `GuiThreadLogRelay` (tk-aftereffects sends every log record to AE over the RPC socket).
+- Every dialog is parented to the Toolkit window (`AppDialog.dialog_parent()`), never to `None`.
+- Row status goes through `AppDialog.set_row_status(row, status, message, tooltip)`; the header
+  summary and empty state update from it.
+- ExtendScript runs through `python/app/afterfx.py`: arguments reach the script as
+  `$.global.TS_JSX_ARGS`, and failures, timeouts and scripts that never ran raise `AfterFXError`.
+
+---
+
 [![Python 2.7 3.7](https://img.shields.io/badge/python-2.7%20%7C%203.7-blue.svg)](https://www.python.org/)
 [![Build Status](https://dev.azure.com/shotgun-ecosystem/Toolkit/_apis/build/status/Apps/tk-multi-starterapp?branchName=master)](https://dev.azure.com/shotgun-ecosystem/Toolkit/_build/latest?definitionId=57&branchName=master)
 [![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
