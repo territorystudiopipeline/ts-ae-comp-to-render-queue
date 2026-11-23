@@ -41,6 +41,36 @@ The defaults give the same paths as Toolkit only if:
 
 Change the templates if any of these differ. Run the tests with `python -m unittest discover tests`.
 
+## Publishing with AYON (in progress)
+
+The tool renders (locally or on Deadline) to the template paths above. AYON's Publisher then
+publishes those files through its own After Effects `render` creator, with the render target
+**Use existing frames** (`frames`). Publishing stays a manual step after the render.
+
+- `python/app/ayon_publish.py`: `publish_comps(comp_ids)` gives each comp a render instance set to
+  `frames`. Existing instances are switched over; new ones are created with AYON's creator, with
+  the comp name in the product name. It's meant for a "Publish with AYON" tick box in the dialog
+  (not wired yet).
+- `ayon_plugins/publish/collect_ts_render_frame_range.py`: AYON takes the frame range from the
+  comp, but most renders use the work area. These plug-ins publish the render queue item's
+  Time Span instead, with no handles, for `frames` instances. The rez package adds
+  `ayon_plugins/publish` to `PYBLISHPLUGINPATH`, so the AYON fork doesn't need to change for them.
+
+AYON After Effects settings (`aftereffects/create/RenderCreator`) to change:
+
+- `rename_comp_to_product_name`: off. Otherwise creating an instance renames the comp.
+- `force_setting_values`: off. Otherwise creating an instance resets the comp's frame range and
+  resolution from the AYON folder.
+
+Rules for comps published this way:
+
+- Each comp needs exactly one render queue item. AYON's Validate Render Queue rejects
+  duplicates and offers a Repair.
+- Clear Finished must not remove the item before publishing. The item's output path is how the
+  Publisher finds the files.
+- Collecting a publish re-queues items that are Done. That's AYON's behaviour, so expect those
+  items to show as queued again afterwards.
+
 ## Look (ts_qt_utils)
 
 The window uses the studio `ts_qt_utils` package: `StyleLoader` (dark theme) plus
