@@ -10,6 +10,37 @@ templates, and renders locally or submits to Deadline 10 (through DeadlineConnec
 | `afterfx_path` | empty | `AfterFX.com` used to run the manifest scripts. Empty finds it from the running After Effects version. |
 | `afterfx_timeout` | 0 | Seconds to wait for each After Effects script run (0 means the default, 300). |
 
+## AYON settings and output paths (in progress)
+
+The AYON version doesn't use Toolkit settings or templates. These two modules replace them; the
+dialog doesn't use them yet.
+
+- `python/app/settings_defaults.json` holds the values from `ts-ae-comp-to-render-queue.yml` in
+  ts-config-default2. `python/app/settings.py` loads it and merges any JSON files listed in
+  `TS_COMP_TO_RQ_SETTINGS` (separated like `PATH`; later files win; dictionaries merge, lists are
+  replaced). A missing or broken override file raises an error instead of silently using the defaults.
+  `{package_root}` in a path replaces Toolkit's `{self}`.
+- `python/app/output_paths.py` builds the render paths. The six Toolkit templates per entity type
+  (`ae_<entity>_work_mov_render` and so on) differed only in their render root, so there are now
+  six templates that use `{render_root}`, plus a render root picked by AYON folder type:
+
+| Toolkit | AYON setting (`output_templates`) | Default |
+|---|---|---|
+| `@shot_root`, `@sequence_root`, `@asset_root`, `@customentity04_root` + `/_work/aftereffects/renders` | `render_root_profiles` | `{root[work]}/{project[name]}{folder[path]}/_work/aftereffects/renders` |
+| `@project_root` (`artists/{User}`) + `aftereffects/renders` | `project_render_root` | `{root[work]}/{project[name]}/artists/{user[name]}/aftereffects/renders` |
+| `{version}` (3 digits) | | `{version:0>3}` |
+| `{SEQ}` (written as `[####]` for After Effects) | `sequence_frame_token` | `{frame}` = `[####]` |
+| `{name}`, `{version}` read from the project file name | `workfile_regex` | same pattern as before |
+
+The defaults give the same paths as Toolkit only if:
+
+- the AYON root is called `work` and points at the projects-a share;
+- AYON project names match the Toolkit project folders;
+- AYON folder paths mirror the disk layout (`/sequences/<seq>/<shot>`, `/assets/<type>/<group>/<asset>`);
+- AYON user names match the `artists/<User>` folders.
+
+Change the templates if any of these differ. Run the tests with `python -m unittest discover tests`.
+
 ## Look (ts_qt_utils)
 
 The window uses the studio `ts_qt_utils` package: `StyleLoader` (dark theme) plus

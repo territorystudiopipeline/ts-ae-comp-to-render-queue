@@ -1,0 +1,62 @@
+{
+    "default_first_frame": 1001,
+    "default_last_frame": 1100,
+
+    "render_presets": [
+        {"name": "EXR", "path": "{package_root}/hooks/render_presets/exr_workingSpace_RGBA.aep"},
+        {"name": "prores 422", "path": "{package_root}/hooks/render_presets/mov_prores422_RGB.aep"},
+        {"name": "prores 4444", "path": "{package_root}/hooks/render_presets/mov_prores4444_RGB.aep"},
+        {"name": "prores 4444 (+ alpha)", "path": "{package_root}/hooks/render_presets/mov_prores4444_RGBA.aep"},
+        {"name": "png 16bit (+ alpha)", "path": "{package_root}/hooks/render_presets/png_16bit_RGBA.aep"}
+    ],
+    "render_preset_movie_formats": [
+        "vdr", "wav", "dvs", "fb", "omf", "omfi", "stm", "tar", "vpr", "gif", "img", "flc", "flm",
+        "mp3", "mov", "rm", "avi", "wmv", "mpg", "m4a", "mpeg", "mp4"
+    ],
+
+    "deadline_defaults": {
+        "secondary_pool": "ae-renderfarm",
+        "group": "ae",
+        "department": "",
+        "priority": 30,
+        "task_timeout_minutes": 0,
+        "on_job_complete": ["Nothing", "Archive", "Delete"],
+        "frames": 1,
+        "frames_per_task": 35,
+        "machine_limit": 0,
+        "concurrent_tasks": 1,
+        "limit_groups": [],
+        "movie_formats": [
+            "vdr", "wav", "dvs", "fb", "omf", "omfi", "stm", "tar", "vpr", "gif", "img", "flc", "flm",
+            "mp3", "mov", "rm", "avi", "wmv", "mpg", "m4a", "mpeg", "mp4"
+        ],
+        "failure_detection_task_errors": 8,
+        "failure_detection_job_errors": 20
+    },
+    "deadline_host": "ldn-dl-rcs",
+    "deadline_port": 8081,
+    "qsettings_ignore_list": ["pool"],
+
+    "afterfx_path": "",
+    "afterfx_timeout": 0,
+
+    "output_templates": {
+        "workfile_regex": "^(?P<prefix>.*)_(?P<name>.*)_v(?P<version>\\d{3})",
+        "sequence_frame_token": "[####]",
+
+        "render_root_profiles": [
+            {
+                "folder_types": [],
+                "render_root": "{root[work]}/{project[name]}{folder[path]}/_work/aftereffects/renders"
+            }
+        ],
+        "project_render_root": "{root[work]}/{project[name]}/artists/{user[name]}/aftereffects/renders",
+
+        "mov_render": "{render_root}/{name}/v{version:0>3}/{ext}/{name}_v{version:0>3}.{ext}",
+        "seq_render": "{render_root}/{name}/v{version:0>3}/{ext}/{name}_v{version:0>3}.{frame}.{ext}",
+        "render_scene": "{render_root}/{name}/v{version:0>3}/{ext}/aep/{name}_v{version:0>3}.aep",
+        "mov_render_comp": "{render_root}/{name}/v{version:0>3}/{ae_comp_name}/{ext}/{ae_comp_name}_v{version:0>3}.{ext}",
+        "seq_render_comp": "{render_root}/{name}/v{version:0>3}/{ae_comp_name}/{ext}/{ae_comp_name}_v{version:0>3}.{frame}.{ext}",
+        "comp_render_scene": "{render_root}/{name}/v{version:0>3}/{ae_comp_name}/{ext}/aep/{ae_comp_name}_v{version:0>3}.aep"
+    }
+}
